@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tracking Test Page</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; padding: 2rem; }
+        .card { background: #1e293b; border-radius: 12px; padding: 2rem; max-width: 600px; margin: 0 auto; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1); }
+        button { background: #3b82f6; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 8px; cursor: pointer; font-weight: 600; transition: background 0.2s; }
+        button:hover { background: #2563eb; }
+        input { background: #334155; border: 1px solid #475569; color: white; padding: 0.75rem; border-radius: 8px; width: 100%; margin-bottom: 1rem; }
+        h1 { margin-top: 0; color: #60a5fa; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Tracker Test</h1>
+        <p>This page automatically sends a pageview event.</p>
+        
+        <div style="margin-top: 2rem;">
+            <h3>Test Identification</h3>
+            <input type="email" id="email" placeholder="Enter email to identify">
+            <button onclick="identifyUser()">Identify Me</button>
+        </div>
+
+        <div style="margin-top: 2rem;">
+            <h3>Custom Event</h3>
+            <button onclick="trackClick()">Track Button Click</button>
+        </div>
+    </div>
+
+    <script src="./tracker.js"></script>
+    <script>
+        function identifyUser() {
+            const email = document.getElementById('email').value;
+            if (email) {
+                window.tracker.identify(email, { email: email });
+                alert('Identified as ' + email);
+            }
+        }
+
+        function trackClick() {
+            window.tracker.track('button_click', { button_name: 'test_button' });
+            alert('Event tracked!');
+        }
+    </script>
+</body>
+</html>

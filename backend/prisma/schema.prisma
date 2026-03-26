@@ -1,0 +1,60 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Visitor {
+  id              String            @id @default(uuid())
+  createdAt       DateTime          @default(now())
+  sessions        Session[]
+  identityMapping IdentityMapping?
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  visitorId String
+  visitor   Visitor  @relation(fields: [visitorId], references: [id])
+  startedAt DateTime @default(now())
+  endedAt   DateTime?
+  device    String?
+  ip        String?
+  location  String?
+  userAgent String?
+  events    Event[]
+
+  @@index([visitorId])
+}
+
+model Event {
+  id        String   @id @default(uuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id])
+  name      String
+  properties Json?
+  timestamp DateTime @default(now())
+
+  @@index([sessionId])
+}
+
+model User {
+  id              String            @id
+  email           String?
+  createdAt       DateTime          @default(now())
+  identityMappings IdentityMapping[]
+}
+
+model IdentityMapping {
+  id        Int      @id @default(autoincrement())
+  visitorId String   @unique
+  visitor   Visitor  @relation(fields: [visitorId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  linkedAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
