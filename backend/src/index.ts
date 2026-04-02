@@ -1,20 +1,37 @@
-const express = require('express');
-const { PrismaClient } = require('@prisma/client');
-const cors = require('cors');
-const dotenv = require('dotenv');
+import express, { Request, Response, NextFunction } from 'express';
+import path from 'path';
+import { PrismaClient } from '@prisma/client';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import geoip from 'geoip-lite';
 
 dotenv.config();
 
 const app = express();
+// In Prisma 7, the URL must be passed if not in schema. prisma.config.ts helps CLI but client needs it too.
 const prisma = new PrismaClient();
+
 const PORT = process.env.PORT || 3001;
 const API_KEY = process.env.TRACKING_API_KEY || 'default_secret_key';
 
-app.use(cors());
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-api-key']
+}));
 app.use(express.json());
 
+// Simple logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
+
+// Serve the tracking snippet as a static file
+app.use('/snippet', express.static(path.join(__dirname, '../../snippet')));
+
 // Middleware to check API Key
-const apiKeyMiddleware = (req, res, next) => {
+const apiKeyMiddleware = (req: Request, res: Response, next: NextFunction) => {
   const key = req.headers['x-api-key'];
   if (key !== API_KEY) {
     return res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
@@ -22,108 +39,175 @@ const apiKeyMiddleware = (req, res, next) => {
   next();
 };
 
-// 1. Log a new event
-app.post('/api/v1/track', apiKeyMiddleware, async (req, res) => {
+// ... (rest of the endpoints remain the same, just keeping it concise for the fix)
+app.post('/api/v1/track', apiKeyMiddleware, async (req: Request, res: Response) => {
   const { visitorId, sessionId, name, properties, context } = req.body;
-
-  if (!visitorId || !sessionId || !name) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
+  if (!visitorId || !sessionId || !name) return res.status(400).json({ error: 'Missing required fields' });
   try {
-    // Upsert visitor
-    const visitor = await prisma.visitor.upsert({
-      where: { id: visitorId },
-      update: {},
-      create: { id: visitorId },
-    });
+    // Ensure visitor exists (or create if not)
+    await prisma.visitor.upsert({ where: { id: visitorId }, update: {}, create: { id: visitorId } });
 
-    // Get or create session
+    // Update session or create new one
     let session = await prisma.session.findUnique({
-      where: { id: sessionId },
+      where: { id: sessionId }
     });
 
     if (!session) {
+      const ipRaw = (req.headers['x-forwarded-for'] || req.ip || context?.ip) as string;
+      const ip = (ipRaw || '').split(',')[0].trim();
+      let locationStr = context?.location as string;
+
+      if (!locationStr) {
+        if (ip === '::1' || ip === '127.0.0.1') {
+          locationStr = JSON.stringify({ country: 'VN', region: 'VN-SG', city: 'Ho Chi Minh City', timezone: 'Asia/Ho_Chi_Minh' });
+        } else {
+          const geo = geoip.lookup(ip);
+          if (geo) {
+            locationStr = JSON.stringify({ country: geo.country, region: geo.region, city: geo.city, timezone: geo.timezone });
+          }
+        }
+      }
+
       session = await prisma.session.create({
         data: {
           id: sessionId,
-          visitorId: visitor.id,
-          ip: req.ip || context?.ip,
-          userAgent: req.headers['user-agent'] || context?.userAgent,
-          device: context?.device,
-          location: context?.location,
-        },
+          visitorId: visitorId,
+          userAgent: (req.headers['user-agent'] || context?.userAgent) as string,
+          device: context?.device as string,
+          ip: ip,
+          location: locationStr,
+        }
       });
+    } else {
+      // Update updatedAt to track "last seen"
+      await prisma.session.update({
+        where: { id: sessionId },
+        data: { updatedAt: new Date() }
+      });
+    }
+
+    // Merge context.url into properties to ensure it's available in dashboard
+    const mergedProperties = { ...(properties || {}) };
+    if (context?.url && !mergedProperties.url) {
+      mergedProperties.url = context.url;
     }
 
     // Create event
     const event = await prisma.event.create({
       data: {
-        sessionId: session.id,
+        sessionId,
         name,
-        properties: properties || {},
-      },
+        properties: mergedProperties,
+        timestamp: context?.timestamp ? new Date(context.timestamp) : new Date()
+      }
     });
-
     res.status(201).json({ success: true, eventId: event.id });
-  } catch (error) {
-    console.error('Track error:', error);
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 2. Identify a user (Identity Stitching)
-app.post('/api/v1/identify', apiKeyMiddleware, async (req, res) => {
-  const { visitorId, userId, traits } = req.body;
+app.post('/api/v1/identify', apiKeyMiddleware, async (req: Request, res: Response) => {
+  let { visitorId, userId, traits } = req.body;
+  if (!visitorId || !userId) return res.status(400).json({ error: 'Missing visitorId or userId' });
+  
+  // Sticky Identity: Check if visitor is already mapped to an ERP ID
+  const existingMapping = await prisma.identityMapping.findUnique({
+    where: { visitorId },
+    include: { user: true }
+  });
 
-  if (!visitorId || !userId) {
-    return res.status(400).json({ error: 'Missing visitorId or userId' });
+  // Prioritize ERP ID from payload or fallback to existing bound ERP ID
+  let extractedErpId = traits?.erpId || traits?.erpid || traits?.erp_id;
+  if (!extractedErpId && existingMapping?.user?.erpId) {
+    extractedErpId = existingMapping.user.erpId; // STICKY: Do not downgrade!
+  }
+
+  if (extractedErpId) {
+    userId = extractedErpId; // Override UUID with ERP ID
+    if (!traits) traits = {};
+    traits.erpId = extractedErpId;
   }
 
   try {
-    // Create/Update user
-    const user = await prisma.user.upsert({
-      where: { id: userId },
-      update: { email: traits?.email },
-      create: { id: userId, email: traits?.email },
+    const user = await prisma.user.upsert({ 
+      where: { id: userId }, 
+      update: { 
+        email: traits?.email,
+        name: traits?.name || (traits?.firstname ? `${traits?.firstname} ${traits?.lastname || ''}`.trim() : undefined),
+        erpId: extractedErpId,
+        traits: traits || {}
+      }, 
+      create: { 
+        id: userId, 
+        email: traits?.email,
+        name: traits?.name || (traits?.firstname ? `${traits?.firstname} ${traits?.lastname || ''}`.trim() : undefined),
+        erpId: extractedErpId,
+        traits: traits || {}
+      } 
     });
+    const mapping = await prisma.identityMapping.upsert({ where: { visitorId }, update: { userId }, create: { visitorId, userId } });
 
-    // Create identity mapping
-    const mapping = await prisma.identityMapping.upsert({
-      where: { visitorId },
-      update: { userId },
-      create: { visitorId, userId },
-    });
+    // Clean up orphaned UUID user if a merge happened
+    if (req.body.userId !== userId) {
+      try {
+        const orphanLinks = await prisma.identityMapping.count({ where: { userId: req.body.userId }});
+        if (orphanLinks === 0) {
+          await prisma.user.delete({ where: { id: req.body.userId }});
+        }
+      } catch (e) { /* ignore */ }
+    }
 
     res.json({ success: true, mapping });
-  } catch (error) {
-    console.error('Identify error:', error);
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// 3. Analytics: Get all sessions with events
-app.get('/api/v1/analytics/sessions', async (req, res) => {
+app.get('/api/v1/analytics/sessions', async (req: Request, res: Response) => {
   try {
     const sessions = await prisma.session.findMany({
       include: {
         events: true,
-        visitor: {
-          include: {
-            identityMapping: {
-              include: {
-                user: true
-              }
-            }
-          }
-        }
+        visitor: { include: { identityMapping: { include: { user: true } } } }
       },
       orderBy: { startedAt: 'desc' },
     });
-
     res.json(sessions);
-  } catch (error) {
+  } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Get active users (last 1 minute)
+app.get('/api/v1/active-users', async (req, res) => {
+  try {
+    const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+    const count = await prisma.session.count({
+      where: {
+        updatedAt: {
+          gt: oneMinuteAgo
+        },
+        endedAt: null // Explicitly not ended
+      }
+    });
+    res.json({ count });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch active users' });
+  }
+});
+
+// Explicit session end
+app.post('/api/v1/session-end', apiKeyMiddleware, async (req, res) => {
+  const { sessionId } = req.body;
+  try {
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { endedAt: new Date() }
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to end session' });
   }
 });
 

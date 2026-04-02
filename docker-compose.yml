@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:latest
+    container_name: tracking-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: tracking_user
+      POSTGRES_PASSWORD: tracking_password
+      POSTGRES_DB: tracking_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+
+volumes:
+  postgres_data:

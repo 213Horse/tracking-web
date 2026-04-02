@@ -19,6 +19,7 @@ model Session {
   visitorId String
   visitor   Visitor  @relation(fields: [visitorId], references: [id])
   startedAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
   endedAt   DateTime?
   device    String?
   ip        String?
@@ -43,6 +44,9 @@ model Event {
 model User {
   id              String            @id
   email           String?
+  name            String?
+  erpId           String?
+  traits          Json?
   createdAt       DateTime          @default(now())
   identityMappings IdentityMapping[]
 }
