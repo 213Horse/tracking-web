@@ -79,10 +79,10 @@ app.post('/api/v1/track', apiKeyMiddleware, async (req: Request, res: Response) 
         }
       });
     } else {
-      // Update updatedAt to track "last seen"
+      // Update updatedAt to track "last seen" and clear endedAt just in case it was briefly closed
       await prisma.session.update({
         where: { id: sessionId },
-        data: { updatedAt: new Date() }
+        data: { updatedAt: new Date(), endedAt: null }
       });
     }
 
@@ -182,11 +182,11 @@ app.get('/api/v1/analytics/sessions', async (req: Request, res: Response) => {
 // Get active users (last 1 minute)
 app.get('/api/v1/active-users', async (req, res) => {
   try {
-    const oneMinuteAgo = new Date(Date.now() - 60 * 1000);
+    const activeWindow = new Date(Date.now() - 60 * 1000); // 1 minute window for active presence
     const count = await prisma.session.count({
       where: {
         updatedAt: {
-          gt: oneMinuteAgo
+          gt: activeWindow
         },
         endedAt: null // Explicitly not ended
       }
@@ -194,6 +194,21 @@ app.get('/api/v1/active-users', async (req, res) => {
     res.json({ count });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch active users' });
+  }
+});
+
+// Session Heartbeat Ping
+app.post('/api/v1/ping', apiKeyMiddleware, async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'Session ID required' });
+  try {
+    await prisma.session.update({
+      where: { id: sessionId },
+      data: { updatedAt: new Date(), endedAt: null }
+    });
+    res.json({ success: true });
+  } catch (error) {
+    res.json({ success: false }); // Ignore errors if session missing
   }
 });
 

@@ -9,6 +9,7 @@ interface Event {
   name: string;
   timestamp: string;
   properties: any;
+  context?: any;
 }
 
 interface Session {
@@ -39,8 +40,13 @@ const App = () => {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [activeUsers, setActiveUsers] = useState<number>(0);
+  const [prevActiveUsers, setPrevActiveUsers] = useState<number>(0);
   const [activeTab, setActiveTab] = useState<'dashboard' | 'users' | 'events'>('dashboard');
   const [selectedVisitorId, setSelectedVisitorId] = useState<string | null>(null);
+  
+  // Interactive Analysis Block State
+  const [activeAnalysisTab, setActiveAnalysisTab] = useState<string>('Đường dẫn');
+  const [analysisSearch, setAnalysisSearch] = useState<string>('');
 
   const formatDate = (date: string | Date) => {
     try {
@@ -83,7 +89,12 @@ const App = () => {
 
       fetch('http://localhost:3001/api/v1/active-users')
         .then(res => res.json())
-        .then(data => setActiveUsers(data.count))
+        .then(data => {
+          setActiveUsers(prev => {
+            setPrevActiveUsers(prev);
+            return data.count;
+          });
+        })
         .catch(err => console.error(err));
     };
 
@@ -92,8 +103,243 @@ const App = () => {
     return () => clearInterval(interval);
   }, []);
 
-  const totalEvents = sessions.reduce((acc, s) => acc + s.events.length, 0);
-  const identifiedUsers = Array.from(new Set(sessions.map(s => s.visitor.identityMapping?.user?.id).filter(Boolean))).length;
+  const activeUsersTrend = prevActiveUsers === 0 ? (activeUsers > 0 ? 100 : 0) : ((activeUsers - prevActiveUsers) / prevActiveUsers) * 100;
+
+  // Advanced Top Level Metrics
+  const pageviewsCount = sessions.flatMap(s => s.events).filter(e => e.name === 'pageview').length;
+  const uniqueVisitorsCount = new Set(sessions.map(s => s.visitorId)).size;
+  const sessionsCount = sessions.length;
+  
+  const totalDurationSec = sessions.reduce((acc, s) => {
+    const start = new Date(s.startedAt).getTime();
+    const end = s.updatedAt ? new Date(s.updatedAt).getTime() : start;
+    return acc + (end - start);
+  }, 0) / 1000;
+  const avgDurationSec = sessionsCount > 0 ? totalDurationSec / sessionsCount : 0;
+  
+  // A bounce is typically a session with only 1 active interaction (e.g., just the landing pageview).
+  // We ignore passive 'heartbeat' events so they don't artificially lower the bounce rate to 0%.
+  const bounces = sessions.filter(s => s.events.filter(e => e.name !== 'heartbeat').length <= 1).length;
+  const bounceRate = sessionsCount > 0 ? (bounces / sessionsCount) * 100 : 0;
+
+  // Calculate Time-based Trends
+  let pageviewsTrend = 0, visitorsTrend = 0, sessionsTrend = 0, durationTrend = 0, bounceTrend = 0;
+  if (sessions.length > 0) {
+    const sorted = [...sessions].sort((a, b) => new Date(a.startedAt).getTime() - new Date(b.startedAt).getTime());
+    const minTime = new Date(sorted[0].startedAt).getTime();
+    const maxTime = new Date(sorted[sorted.length - 1].startedAt).getTime();
+    
+    if (maxTime > minTime) {
+      const midTime = minTime + (maxTime - minTime) / 2;
+      const prevSessions = sorted.filter(s => new Date(s.startedAt).getTime() < midTime);
+      const currSessions = sorted.filter(s => new Date(s.startedAt).getTime() >= midTime);
+      
+      const getMetrics = (sessList: typeof sessions) => {
+        const count = sessList.length;
+        const pvs = sessList.flatMap(s => s.events).filter(e => e.name === 'pageview').length;
+        const uvs = new Set(sessList.map(s => s.visitorId)).size;
+        const dur = sessList.reduce((acc, s) => acc + (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()), 0) / 1000;
+        const avgDur = count > 0 ? dur / count : 0;
+        const bnc = sessList.filter(s => s.events.filter(e => e.name !== 'heartbeat').length <= 1).length;
+        const bncRate = count > 0 ? (bnc / count) * 100 : 0;
+        return { count, pvs, uvs, avgDur, bncRate };
+      };
+      
+      const prev = getMetrics(prevSessions);
+      const curr = getMetrics(currSessions);
+      
+      const calcPct = (c: number, p: number) => p === 0 ? (c > 0 ? 100 : 0) : ((c - p) / p) * 100;
+      
+      sessionsTrend = calcPct(curr.count, prev.count);
+      pageviewsTrend = calcPct(curr.pvs, prev.pvs);
+      visitorsTrend = calcPct(curr.uvs, prev.uvs);
+      durationTrend = calcPct(curr.avgDur, prev.avgDur);
+      bounceTrend = calcPct(curr.bncRate, prev.bncRate);
+    } else {
+      // If there's only one timestamp (e.g. just started), assume 100% growth from 0.
+      sessionsTrend = 100; pageviewsTrend = 100; visitorsTrend = 100; durationTrend = 100; bounceTrend = 0;
+    }
+  }
+
+  const formatTrend = (val: number) => {
+    const sign = val < 0 ? '-' : '';
+    return `${sign}${Math.abs(val).toFixed(1)}%`;
+  };
+
+  // Dynamic Aggregation for Interactive Filters
+  const analysisStatsMap = new Map();
+  
+  if (activeAnalysisTab === 'Đường dẫn' || activeAnalysisTab === 'Tiêu đề') {
+    // Event-Level Grouping
+    sessions.forEach(s => {
+      // Create a set of distinct dimensions tracked during this session
+      // to avoid double-counting bounces per session-path.
+      const dimensionsInSession = new Set();
+      
+      s.events.forEach(e => {
+        if (e.name !== 'pageview') return;
+        
+        let dimValue = '/';
+        if (activeAnalysisTab === 'Đường dẫn') {
+          if (e.context?.url) {
+            try { dimValue = new URL(e.context.url).pathname; } catch(err) {}
+          } else if (e.properties?.url) {
+            try { dimValue = new URL(e.properties.url).pathname; } catch(err) { dimValue = e.properties.url || '/'; }
+          }
+        } else if (activeAnalysisTab === 'Tiêu đề') {
+          let rawTitle = e.properties?.title;
+          const urlString = e.context?.url || e.properties?.url;
+          
+          if (urlString) {
+            try {
+              const parsedUrl = new URL(urlString);
+              const pathName = parsedUrl.pathname;
+              
+              if (pathName && pathName !== '/') {
+                // If it's a generic title or Title is requested but actual tag is generic
+                if (!rawTitle || rawTitle.includes('BOOKMEDI - Sách Ngoại Văn Chính Hãng')) {
+                  const segments = pathName.split('/').filter(Boolean);
+                  const lastSegment = segments[segments.length - 1];
+                  if (lastSegment) {
+                    // Convert slug to Readably Capitalized Title
+                    rawTitle = lastSegment.replace(/-/g, ' ');
+                    rawTitle = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
+                  }
+                }
+              } else {
+                rawTitle = 'Trang chủ';
+              }
+            } catch(err) {}
+          }
+          dimValue = rawTitle || 'Trang chủ';
+        }
+        
+        const isFirstTimeInSession = !dimensionsInSession.has(dimValue);
+        dimensionsInSession.add(dimValue);
+
+        if (!analysisStatsMap.has(dimValue)) {
+          analysisStatsMap.set(dimValue, {
+            name: dimValue,
+            visitors: new Set([s.visitorId]),
+            sessionsData: new Set([s.id]),
+            pageviews: 1,
+            bounces: s.events.filter(e => e.name !== 'heartbeat').length <= 1 ? 1 : 0,
+            totalDurationSec: (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000
+          });
+        } else {
+          const existing = analysisStatsMap.get(dimValue);
+          existing.visitors.add(s.visitorId);
+          existing.sessionsData.add(s.id);
+          existing.pageviews += 1;
+          
+          if (isFirstTimeInSession) {
+            if (s.events.filter(e => e.name !== 'heartbeat').length <= 1) existing.bounces += 1;
+            existing.totalDurationSec += (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000;
+          }
+        }
+      });
+    });
+  } else {
+    // Session-Level Grouping
+    sessions.forEach(s => {
+      let dimValue = '(Không xác định)';
+      
+      const sortedEvents = s.events.sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+      const pageviewsEvents = sortedEvents.filter(e => e.name === 'pageview');
+      const firstPv = pageviewsEvents.length > 0 ? pageviewsEvents[0] : null;
+      const lastPv = pageviewsEvents.length > 0 ? pageviewsEvents[pageviewsEvents.length - 1] : null;
+
+      const getPath = (pvTarget: any) => {
+        if (!pvTarget) return '/';
+        if (pvTarget.context?.url) {
+          try { return new URL(pvTarget.context.url).pathname; } catch(e) {}
+        } else if (pvTarget.properties?.url) {
+          try { return new URL(pvTarget.properties.url).pathname; } catch(e) { return pvTarget.properties?.url || '/'; }
+        }
+        return '/';
+      };
+      
+      switch (activeAnalysisTab) {
+        case 'Quốc gia':
+          if (s.location && s.location.includes('{')) {
+            try { const geo = JSON.parse(s.location); if (geo.country) dimValue = geo.country; } catch(e) {}
+          }
+          break;
+        case 'Thành phố':
+          if (s.location && s.location.includes('{')) {
+            try { const geo = JSON.parse(s.location); if (geo.city) dimValue = geo.city; } catch(e) {}
+          }
+          break;
+        case 'Trình duyệt':
+          const ua = s.userAgent || '';
+          if (ua.includes('Chrome') && !ua.includes('Edg')) dimValue = 'Chrome';
+          else if (ua.includes('Safari') && !ua.includes('Chrome')) dimValue = 'Safari';
+          else if (ua.includes('Firefox')) dimValue = 'Firefox';
+          else if (ua.includes('Edg')) dimValue = 'Edge';
+          else dimValue = 'Other';
+          break;
+        case 'Hệ điều hành':
+          const uaOS = s.userAgent || '';
+          if(uaOS.includes('Mac OS')) dimValue = 'macOS';
+          else if(uaOS.includes('Windows')) dimValue = 'Windows';
+          else if(uaOS.includes('Linux')) dimValue = 'Linux';
+          else if(uaOS.includes('Android')) dimValue = 'Android';
+          else if(uaOS.includes('iOS') || uaOS.includes('iPhone')) dimValue = 'iOS';
+          break;
+        case 'Trang vào':
+          dimValue = getPath(firstPv);
+          break;
+        case 'Trang thoát':
+          dimValue = getPath(lastPv);
+          break;
+        case 'Nguồn giới thiệu':
+          if (firstPv && firstPv.context?.referrer) {
+             try { dimValue = new URL(firstPv.context.referrer).hostname; } catch(e) { dimValue = firstPv.context.referrer || 'Direct/Unknown'; }
+          } else dimValue = 'Direct/Unknown';
+          break;
+        case 'Thiết bị':
+          dimValue = s.device?.includes('x') ? 'Desktop/Laptop' : 'Mobile';
+          break;
+        case 'Ngôn ngữ':
+          if (firstPv && firstPv.context?.language) dimValue = firstPv.context.language;
+          else dimValue = 'vi-VN';
+          break;
+        default:
+          dimValue = '-';
+      }
+
+      if (!analysisStatsMap.has(dimValue)) {
+        analysisStatsMap.set(dimValue, {
+          name: dimValue,
+          visitors: new Set([s.visitorId]),
+          sessionsData: new Set([s.id]),
+          pageviews: s.events.filter(e => e.name === 'pageview').length,
+          bounces: s.events.filter(e => e.name !== 'heartbeat').length <= 1 ? 1 : 0,
+          totalDurationSec: (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000
+        });
+      } else {
+        const existing = analysisStatsMap.get(dimValue);
+        existing.visitors.add(s.visitorId);
+        existing.sessionsData.add(s.id);
+        existing.pageviews += s.events.filter(e => e.name === 'pageview').length;
+        if (s.events.filter(e => e.name !== 'heartbeat').length <= 1) existing.bounces += 1;
+        existing.totalDurationSec += (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000;
+      }
+    });
+  }
+
+  const analysisStats = Array.from(analysisStatsMap.values())
+    .map(stat => {
+      const sessionsCount = stat.sessionsData ? stat.sessionsData.size : stat.sessionsCount;
+      return {
+        ...stat,
+        sessionsCount,
+        visitorsCount: stat.visitors.size,
+        avgDurationSec: sessionsCount > 0 ? stat.totalDurationSec / sessionsCount : 0
+      };
+    })
+    .filter(stat => stat.name.toLowerCase().includes(analysisSearch.toLowerCase()))
+    .sort((a, b) => b.visitorsCount - a.visitorsCount);
   
   const chartData = sessions.slice(0, 10).map(s => ({
     name: formatDate(s.startedAt),
@@ -223,29 +469,28 @@ const App = () => {
         {activeTab === 'dashboard' && (
           <>
             {/* Stats Grid */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6 mb-8">
               {[
-                { label: 'Live Users', value: activeUsers, icon: Activity, color: 'text-red-500', pulse: true },
-                { label: 'Total Sessions', value: sessions.length, icon: Clock, color: 'text-blue-500' },
-                { label: 'Total Events', value: totalEvents, icon: MousePointer2, color: 'text-purple-500' },
-                { label: 'Identified Users', value: identifiedUsers, icon: UserCheck, color: 'text-green-500' },
+                { label: 'ĐANG TRUY CẬP', value: activeUsers, icon: Activity, color: 'text-emerald-500', pulse: true, trend: formatTrend(activeUsersTrend) },
+                { label: 'LƯỢT XEM', value: pageviewsCount.toLocaleString(), icon: Eye, color: 'text-blue-500', trend: formatTrend(pageviewsTrend) },
+                { label: 'KHÁCH TRUY CẬP', value: uniqueVisitorsCount.toLocaleString(), icon: Users, color: 'text-purple-500', trend: formatTrend(visitorsTrend) },
+                { label: 'PHIÊN', value: sessionsCount.toLocaleString(), icon: MousePointer2, color: 'text-indigo-500', trend: formatTrend(sessionsTrend) },
+                { label: 'THỜI GIAN TB', value: `${Math.floor(avgDurationSec / 60)}m ${Math.floor(avgDurationSec % 60)}s`, icon: Clock, color: 'text-orange-500', trend: formatTrend(durationTrend) },
+                { label: 'TỶ LỆ THOÁT', value: `${bounceRate.toFixed(1)}%`, icon: Activity, color: 'text-slate-400', trend: formatTrend(bounceTrend) },
               ].map((stat) => (
-                <div key={stat.label} className="bg-[#1e293b] p-6 rounded-2xl border border-[#334155] hover:border-[#475569] transition-all relative overflow-hidden group">
+                <div key={stat.label} className="bg-[#1e293b] p-5 rounded-2xl border border-[#334155] flex flex-col items-center justify-center text-center relative overflow-hidden">
                   {stat.pulse && (
-                    <div className="absolute top-0 right-0 p-2">
-                      <span className="relative flex h-3 w-3">
-                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                        <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
-                      </span>
-                    </div>
+                    <div className="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
                   )}
-                  <div className="flex justify-between items-start mb-4">
-                    <div className={`p-3 rounded-xl bg-[#0f172a] ${stat.color}`}>
-                      <stat.icon size={24} />
-                    </div>
+                  <div className={`mb-3 ${stat.color}`}>
+                    <stat.icon size={28} />
                   </div>
-                  <h3 className="text-slate-400 text-sm font-medium">{stat.label}</h3>
-                  <p className="text-3xl font-bold text-white mt-1">{stat.value}</p>
+                  <h3 className="text-slate-400 text-[11px] font-bold uppercase tracking-wider mb-2">{stat.label}</h3>
+                  <p className="text-3xl font-black text-white tracking-tight">{stat.value}</p>
+                  <span className={`text-[10px] font-bold mt-2 hover:opacity-80 cursor-default ${stat.label === 'ĐANG TRUY CẬP' ? 'text-emerald-400' : (stat.trend?.startsWith('-') ? 'text-rose-400' : 'text-emerald-400')}`}>
+                    {stat.trend?.startsWith('-') ? '↓' : '↑'}{stat.trend?.replace('-', '')}
+                    {stat.label === 'ĐANG TRUY CẬP' && <span className="ml-1 opacity-50 font-normal">(Live)</span>}
+                  </span>
                 </div>
               ))}
             </div>
@@ -315,6 +560,95 @@ const App = () => {
                   {sessions.length === 0 && (
                     <div className="text-slate-500 italic text-center py-4">No data</div>
                   )}
+                </div>
+              </div>
+            </div>
+
+            {/* Phân tích chi tiết bộ lọc */}
+            <div className="mt-8 bg-[#1e293b] rounded-2xl border border-[#334155] overflow-hidden">
+              <div className="p-6 border-b border-[#334155] flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                <h3 className="text-lg font-bold text-white">Phân tích chi tiết bộ lọc</h3>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 w-4 h-4" />
+                  <input 
+                    type="text" 
+                    placeholder="Tìm kiếm..." 
+                    value={analysisSearch}
+                    onChange={(e) => setAnalysisSearch(e.target.value)}
+                    className="bg-[#0f172a] border border-[#334155] rounded-xl pl-10 pr-4 py-2 outline-none focus:border-blue-500 transition-all text-sm w-full xl:w-64" 
+                  />
+                </div>
+              </div>
+              
+              <div className="p-4 border-b border-[#334155] bg-[#1e293b]/50">
+                <div className="flex flex-wrap gap-2">
+                  {['Quốc gia', 'Thành phố', 'Trình duyệt', 'Hệ điều hành', 'Thiết bị', 'Ngôn ngữ', 'Đường dẫn', 'Tiêu đề', 'Trang vào', 'Trang thoát', 'Nguồn giới thiệu'].map((tab) => (
+                    <button
+                      key={tab}
+                      onClick={() => setActiveAnalysisTab(tab)}
+                      className={`px-4 py-1.5 text-xs font-semibold rounded-full transition-all ${
+                        activeAnalysisTab === tab 
+                          ? 'bg-blue-500 text-white shadow-md' 
+                          : 'bg-[#334155]/50 text-slate-300 hover:bg-[#334155]'
+                      }`}
+                    >
+                      {tab}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="p-6 grid grid-cols-1 xl:grid-cols-2 gap-8">
+                {/* Chart Side */}
+                <div className="space-y-5 align-middle py-4">
+                  <div className="flex justify-end gap-4 mb-2">
+                    <div className="flex items-center gap-2"><div className="w-3 h-3 bg-orange-500 rounded-sm"></div><span className="text-slate-400 text-xs">Khách</span></div>
+                    <div className="flex items-center gap-2"><div className="w-3 h-3 bg-teal-500 rounded-sm"></div><span className="text-slate-400 text-xs">Lượt xem</span></div>
+                  </div>
+                  {analysisStats.slice(0, 10).map((stat, idx) => {
+                    const maxVal = Math.max(...analysisStats.map(s => Math.max(s.visitorsCount, s.pageviews)), 1);
+                    const vPct = (stat.visitorsCount / maxVal) * 100;
+                    const pPct = (stat.pageviews / maxVal) * 100;
+                    return (
+                      <div key={idx} className="flex relative w-full pr-[30px] lg:pr-[100px]">
+                        <span className="text-slate-300 text-xs w-[120px] text-right truncate mr-4" title={stat.name}>{stat.name}</span>
+                        <div className="w-full flex flex-col gap-1.5 justify-center">
+                          <div className="h-2 bg-orange-500/20 rounded-r-full relative border border-orange-500/50" style={{ width: `${Math.max(vPct, 1)}%` }}></div>
+                          <div className="h-2 bg-teal-500/20 rounded-r-full relative border border-teal-500/50" style={{ width: `${Math.max(pPct, 1)}%` }}></div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {analysisStats.length === 0 && (
+                    <div className="text-slate-500 text-sm italic text-center w-full mt-10">Không tìm thấy dữ liệu</div>
+                  )}
+                </div>
+                {/* Table Side */}
+                <div className="overflow-auto border border-[#334155] rounded-xl self-start max-h-[450px]">
+                  <table className="w-full text-left bg-[#0f172a]">
+                    <thead className="bg-[#1e293b] text-slate-400 text-[10px] uppercase font-bold tracking-wider sticky top-0 z-10">
+                      <tr>
+                        <th className="px-4 py-3 border-b border-[#334155]">{activeAnalysisTab}</th>
+                        <th className="px-4 py-3 border-b border-[#334155] text-right">Khách</th>
+                        <th className="px-4 py-3 border-b border-[#334155] text-right">Lượt xem</th>
+                        <th className="px-4 py-3 border-b border-[#334155] text-right">Phiên</th>
+                        <th className="px-4 py-3 border-b border-[#334155] text-right">Thoát</th>
+                        <th className="px-4 py-3 border-b border-[#334155] text-right">Thời gian TB</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#334155] text-sm">
+                      {analysisStats.map((stat, idx) => (
+                        <tr key={idx} className="hover:bg-[#1e293b]/50">
+                          <td className="px-4 py-3 text-slate-200 font-medium truncate max-w-[200px]" title={stat.name}>{stat.name}</td>
+                          <td className="px-4 py-3 text-slate-300 font-bold text-right">{stat.visitorsCount}</td>
+                          <td className="px-4 py-3 text-slate-400 text-right">{stat.pageviews}</td>
+                          <td className="px-4 py-3 text-slate-400 text-right">{stat.sessionsCount}</td>
+                          <td className="px-4 py-3 text-slate-400 text-right">{stat.bounces}</td>
+                          <td className="px-4 py-3 text-slate-400 text-right">{Math.floor(stat.avgDurationSec / 60)}m {Math.floor(stat.avgDurationSec % 60)}s</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>

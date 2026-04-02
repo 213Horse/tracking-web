@@ -61,6 +61,22 @@
         url: window.location.href,
         ...getUTMS()
       });
+      this.startHeartbeat();
+    },
+
+    startHeartbeat: function() {
+      // Ping the server every 30 seconds to update the session updatedAt timestamp
+      setInterval(() => {
+        if (!isInitialized) return;
+        fetch(`${CONFIG.endpoint}/ping`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'x-api-key': CONFIG.apiKey
+          },
+          body: JSON.stringify({ sessionId })
+        }).catch(err => { /* quiet fail */ });
+      }, 30 * 1000);
     },
 
     track: function(name, properties) {
@@ -123,25 +139,6 @@
       tracker.track('heartbeat', { type: 'keep_alive' });
     }
   }, 30000);
-
-  // Detect when user leaves or hides tab
-  document.addEventListener('visibilitychange', function() {
-    if (document.visibilityState === 'hidden' && isInitialized) {
-      // Send a signal that session might be ending (non-blocking)
-      fetch(`${CONFIG.endpoint}/session-end`, {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'x-api-key': CONFIG.apiKey
-        },
-        body: JSON.stringify({ sessionId }),
-        keepalive: true // Important for unload/visibilitychange
-      });
-    } else if (document.visibilityState === 'visible' && isInitialized) {
-      // Clear endedAt if they come back within the same session
-      tracker.track('heartbeat', { type: 'resume' });
-    }
-  });
 
   // --- Auto Interceptor for Bookmedi API (Universal Sniffing) ---
   const originalFetch = window.fetch;
