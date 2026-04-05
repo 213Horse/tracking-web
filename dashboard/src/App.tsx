@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
 import { Users, MousePointer2, Clock, Search, ArrowRight, LayoutDashboard, Database, Activity, MapPin, Eye, Copy, User, Globe, Monitor, Timer, ShoppingCart, Package, ListOrdered } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
@@ -26,6 +26,21 @@ const ANALYTICS_SESSION_LIMIT = Math.min(
   Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_LIMIT || '8000'), 10) || 8000, 100),
   50000
 );
+
+/** Tab UI → query `dimension` của GET /api/v1/analytics/dimension-stats */
+const DIMENSION_TAB_TO_API: Record<string, string> = {
+  'Quốc gia': 'country',
+  'Thành phố': 'city',
+  'Trình duyệt': 'browser',
+  'Hệ điều hành': 'os',
+  'Thiết bị': 'device',
+  'Ngôn ngữ': 'language',
+  'Đường dẫn': 'path',
+  'Tiêu đề': 'title',
+  'Trang vào': 'entry',
+  'Trang thoát': 'exit',
+  'Nguồn giới thiệu': 'referrer',
+};
 
 interface Event {
   id: string;
@@ -112,6 +127,22 @@ const App = () => {
   const [analysisSearch, setAnalysisSearch] = useState<string>('');
   const [mapTooltip, setMapTooltip] = useState<string | null>(null);
   const [analyticsHint, setAnalyticsHint] = useState<string | null>(null);
+  const [analysisStats, setAnalysisStats] = useState<
+    Array<{
+      name: string;
+      visitorsCount: number;
+      pageviews: number;
+      sessionsCount: number;
+      bounces: number;
+      avgDurationSec: number;
+    }>
+  >([]);
+  const [dimensionStatsLoading, setDimensionStatsLoading] = useState(false);
+
+  const activeAnalysisTabRef = useRef(activeAnalysisTab);
+  const analysisSearchRef = useRef(analysisSearch);
+  activeAnalysisTabRef.current = activeAnalysisTab;
+  analysisSearchRef.current = analysisSearch;
 
   const formatDate = (date: string | Date) => {
     try {
@@ -198,10 +229,104 @@ const App = () => {
         .catch(err => console.error(err));
     };
 
+    const fetchDimensionStats = () => {
+      const dim = DIMENSION_TAB_TO_API[activeAnalysisTabRef.current];
+      if (!dim) return;
+      const since = new Date();
+      since.setDate(since.getDate() - ANALYTICS_WINDOW_DAYS);
+      const qs = new URLSearchParams({
+        dimension: dim,
+        since: since.toISOString(),
+        limit: String(ANALYTICS_SESSION_LIMIT),
+        search: analysisSearchRef.current,
+      });
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/dimension-stats?${qs}`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      })
+        .then((res) => res.json())
+        .then(
+          (data: {
+            rows?: Array<{
+              dimensionValue: string;
+              visitorsCount: number;
+              pageviews: number;
+              sessionsCount: number;
+              bounces: number;
+              avgDurationSec: number;
+            }>;
+          }) => {
+            if (!Array.isArray(data.rows)) return;
+            setAnalysisStats(
+              data.rows.map((row) => ({
+                name: row.dimensionValue,
+                visitorsCount: row.visitorsCount,
+                pageviews: row.pageviews,
+                sessionsCount: row.sessionsCount,
+                bounces: row.bounces,
+                avgDurationSec: row.avgDurationSec,
+              }))
+            );
+          }
+        )
+        .catch((err) => console.error(err));
+    };
+
     fetchData();
-    const interval = setInterval(fetchData, 10000); // Polling every 10s
+    fetchDimensionStats();
+    const interval = setInterval(() => {
+      fetchData();
+      fetchDimensionStats();
+    }, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const dim = DIMENSION_TAB_TO_API[activeAnalysisTab];
+    if (!dim) return;
+    const delay = analysisSearch.trim() ? 400 : 0;
+    const t = setTimeout(() => {
+      const since = new Date();
+      since.setDate(since.getDate() - ANALYTICS_WINDOW_DAYS);
+      const qs = new URLSearchParams({
+        dimension: dim,
+        since: since.toISOString(),
+        limit: String(ANALYTICS_SESSION_LIMIT),
+        search: analysisSearch,
+      });
+      setDimensionStatsLoading(true);
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/dimension-stats?${qs}`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      })
+        .then((res) => res.json())
+        .then(
+          (data: {
+            rows?: Array<{
+              dimensionValue: string;
+              visitorsCount: number;
+              pageviews: number;
+              sessionsCount: number;
+              bounces: number;
+              avgDurationSec: number;
+            }>;
+          }) => {
+            if (!Array.isArray(data.rows)) return;
+            setAnalysisStats(
+              data.rows.map((row) => ({
+                name: row.dimensionValue,
+                visitorsCount: row.visitorsCount,
+                pageviews: row.pageviews,
+                sessionsCount: row.sessionsCount,
+                bounces: row.bounces,
+                avgDurationSec: row.avgDurationSec,
+              }))
+            );
+          }
+        )
+        .catch((err) => console.error(err))
+        .finally(() => setDimensionStatsLoading(false));
+    }, delay);
+    return () => clearTimeout(t);
+  }, [activeAnalysisTab, analysisSearch]);
 
   const activeUsersTrend = prevActiveUsers === 0 ? (activeUsers > 0 ? 100 : 0) : ((activeUsers - prevActiveUsers) / prevActiveUsers) * 100;
 
@@ -295,181 +420,6 @@ const App = () => {
     return `${sign}${Math.abs(val).toFixed(1)}%`;
   };
 
-  // Dynamic Aggregation for Interactive Filters
-  const analysisStatsMap = new Map();
-  
-  if (activeAnalysisTab === 'Đường dẫn' || activeAnalysisTab === 'Tiêu đề') {
-    // Event-Level Grouping
-    sessions.forEach(s => {
-      // Create a set of distinct dimensions tracked during this session
-      // to avoid double-counting bounces per session-path.
-      const dimensionsInSession = new Set();
-      
-      s.events.forEach(e => {
-        if (e.name !== 'pageview') return;
-        
-        let dimValue = '/';
-        if (activeAnalysisTab === 'Đường dẫn') {
-          if (e.context?.url) {
-            try { dimValue = new URL(e.context.url).pathname; } catch(err) {}
-          } else if (e.properties?.url) {
-            try { dimValue = new URL(e.properties.url).pathname; } catch(err) { dimValue = e.properties.url || '/'; }
-          }
-        } else if (activeAnalysisTab === 'Tiêu đề') {
-          let rawTitle = e.properties?.title;
-          const urlString = e.context?.url || e.properties?.url;
-          
-          if (urlString) {
-            try {
-              const parsedUrl = new URL(urlString);
-              const pathName = parsedUrl.pathname;
-              
-              if (pathName && pathName !== '/') {
-                // If it's a generic title or Title is requested but actual tag is generic
-                if (!rawTitle || rawTitle.includes('BOOKMEDI - Sách Ngoại Văn Chính Hãng')) {
-                  const segments = pathName.split('/').filter(Boolean);
-                  const lastSegment = segments[segments.length - 1];
-                  if (lastSegment) {
-                    // Convert slug to Readably Capitalized Title
-                    rawTitle = lastSegment.replace(/-/g, ' ');
-                    rawTitle = rawTitle.charAt(0).toUpperCase() + rawTitle.slice(1);
-                  }
-                }
-              } else {
-                rawTitle = 'Trang chủ';
-              }
-            } catch(err) {}
-          }
-          dimValue = rawTitle || 'Trang chủ';
-        }
-        
-        const isFirstTimeInSession = !dimensionsInSession.has(dimValue);
-        dimensionsInSession.add(dimValue);
-
-        if (!analysisStatsMap.has(dimValue)) {
-          analysisStatsMap.set(dimValue, {
-            name: dimValue,
-            visitors: new Set([s.visitorId]),
-            sessionsData: new Set([s.id]),
-            pageviews: 1,
-            bounces: s.events.filter(e => e.name !== 'heartbeat').length <= 1 ? 1 : 0,
-            totalDurationSec: (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000
-          });
-        } else {
-          const existing = analysisStatsMap.get(dimValue);
-          existing.visitors.add(s.visitorId);
-          existing.sessionsData.add(s.id);
-          existing.pageviews += 1;
-          
-          if (isFirstTimeInSession) {
-            if (s.events.filter(e => e.name !== 'heartbeat').length <= 1) existing.bounces += 1;
-            existing.totalDurationSec += (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000;
-          }
-        }
-      });
-    });
-  } else {
-    // Session-Level Grouping
-    sessions.forEach(s => {
-      let dimValue = '(Không xác định)';
-      
-      const sortedEvents = s.events.sort((a,b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-      const pageviewsEvents = sortedEvents.filter(e => e.name === 'pageview');
-      const firstPv = pageviewsEvents.length > 0 ? pageviewsEvents[0] : null;
-      const lastPv = pageviewsEvents.length > 0 ? pageviewsEvents[pageviewsEvents.length - 1] : null;
-
-      const getPath = (pvTarget: any) => {
-        if (!pvTarget) return '/';
-        if (pvTarget.context?.url) {
-          try { return new URL(pvTarget.context.url).pathname; } catch(e) {}
-        } else if (pvTarget.properties?.url) {
-          try { return new URL(pvTarget.properties.url).pathname; } catch(e) { return pvTarget.properties?.url || '/'; }
-        }
-        return '/';
-      };
-      
-      switch (activeAnalysisTab) {
-        case 'Quốc gia':
-          if (s.location && s.location.includes('{')) {
-            try { const geo = JSON.parse(s.location); if (geo.country) dimValue = geo.country; } catch(e) {}
-          }
-          break;
-        case 'Thành phố':
-          if (s.location && s.location.includes('{')) {
-            try { const geo = JSON.parse(s.location); if (geo.city) dimValue = geo.city; } catch(e) {}
-          }
-          break;
-        case 'Trình duyệt':
-          const ua = s.userAgent || '';
-          if (ua.includes('Chrome') && !ua.includes('Edg')) dimValue = 'Chrome';
-          else if (ua.includes('Safari') && !ua.includes('Chrome')) dimValue = 'Safari';
-          else if (ua.includes('Firefox')) dimValue = 'Firefox';
-          else if (ua.includes('Edg')) dimValue = 'Edge';
-          else dimValue = 'Other';
-          break;
-        case 'Hệ điều hành':
-          const uaOS = s.userAgent || '';
-          if(uaOS.includes('Mac OS')) dimValue = 'macOS';
-          else if(uaOS.includes('Windows')) dimValue = 'Windows';
-          else if(uaOS.includes('Linux')) dimValue = 'Linux';
-          else if(uaOS.includes('Android')) dimValue = 'Android';
-          else if(uaOS.includes('iOS') || uaOS.includes('iPhone')) dimValue = 'iOS';
-          break;
-        case 'Trang vào':
-          dimValue = getPath(firstPv);
-          break;
-        case 'Trang thoát':
-          dimValue = getPath(lastPv);
-          break;
-        case 'Nguồn giới thiệu':
-          if (firstPv && firstPv.context?.referrer) {
-             try { dimValue = new URL(firstPv.context.referrer).hostname; } catch(e) { dimValue = firstPv.context.referrer || 'Direct/Unknown'; }
-          } else dimValue = 'Direct/Unknown';
-          break;
-        case 'Thiết bị':
-          dimValue = s.device?.includes('x') ? 'Desktop/Laptop' : 'Mobile';
-          break;
-        case 'Ngôn ngữ':
-          if (firstPv && firstPv.context?.language) dimValue = firstPv.context.language;
-          else dimValue = 'vi-VN';
-          break;
-        default:
-          dimValue = '-';
-      }
-
-      if (!analysisStatsMap.has(dimValue)) {
-        analysisStatsMap.set(dimValue, {
-          name: dimValue,
-          visitors: new Set([s.visitorId]),
-          sessionsData: new Set([s.id]),
-          pageviews: s.events.filter(e => e.name === 'pageview').length,
-          bounces: s.events.filter(e => e.name !== 'heartbeat').length <= 1 ? 1 : 0,
-          totalDurationSec: (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000
-        });
-      } else {
-        const existing = analysisStatsMap.get(dimValue);
-        existing.visitors.add(s.visitorId);
-        existing.sessionsData.add(s.id);
-        existing.pageviews += s.events.filter(e => e.name === 'pageview').length;
-        if (s.events.filter(e => e.name !== 'heartbeat').length <= 1) existing.bounces += 1;
-        existing.totalDurationSec += (new Date(s.updatedAt || s.startedAt).getTime() - new Date(s.startedAt).getTime()) / 1000;
-      }
-    });
-  }
-
-  const analysisStats = Array.from(analysisStatsMap.values())
-    .map(stat => {
-      const sessionsCount = stat.sessionsData ? stat.sessionsData.size : stat.sessionsCount;
-      return {
-        ...stat,
-        sessionsCount,
-        visitorsCount: stat.visitors.size,
-        avgDurationSec: sessionsCount > 0 ? stat.totalDurationSec / sessionsCount : 0
-      };
-    })
-    .filter(stat => stat.name.toLowerCase().includes(analysisSearch.toLowerCase()))
-    .sort((a, b) => b.visitorsCount - a.visitorsCount);
-  
   const chartData = sessions.slice(0, 10).map(s => ({
     name: formatDate(s.startedAt),
     events: s.events.length
@@ -1039,7 +989,12 @@ const App = () => {
             {/* Phân tích chi tiết bộ lọc */}
             <div className="mt-8 bg-[#1e293b] rounded-2xl border border-[#334155] overflow-hidden">
               <div className="p-6 border-b border-[#334155] flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-                <h3 className="text-lg font-bold text-white">Phân tích chi tiết bộ lọc</h3>
+                <div className="flex flex-col gap-1">
+                  <h3 className="text-lg font-bold text-white">Phân tích chi tiết bộ lọc</h3>
+                  {dimensionStatsLoading && (
+                    <span className="text-xs text-slate-500">Đang tải số liệu từ API…</span>
+                  )}
+                </div>
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 w-4 h-4" />
                   <input 

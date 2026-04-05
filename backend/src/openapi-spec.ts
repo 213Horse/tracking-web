@@ -157,6 +157,54 @@ export function buildOpenApiDocument(baseUrl: string): Record<string, unknown> {
           },
         },
       },
+      '/api/v1/analytics/dimension-stats': {
+        get: {
+          tags: ['Analytics'],
+          summary:
+            'Tổng hợp Phân tích chi tiết (Khách, Lượt xem, Phiên, Thoát, Thời gian TB) theo dimension — tính trên server, có cache DB',
+          parameters: [
+            {
+              name: 'dimension',
+              in: 'query',
+              required: true,
+              schema: {
+                type: 'string',
+                enum: [
+                  'path',
+                  'title',
+                  'country',
+                  'city',
+                  'browser',
+                  'os',
+                  'device',
+                  'language',
+                  'entry',
+                  'exit',
+                  'referrer',
+                ],
+              },
+              description:
+                'path=Đường dẫn, title=Tiêu đề, country, city, browser, os, device, language, entry=Trang vào, exit=Trang thoát, referrer=Nguồn giới thiệu',
+            },
+            { name: 'since', in: 'query', schema: { type: 'string', format: 'date-time' } },
+            { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1 } },
+            { name: 'search', in: 'query', schema: { type: 'string' }, description: 'Lọc theo chuỗi con (không phân biệt hoa thường)' },
+          ],
+          responses: {
+            '200': {
+              description:
+                '{ rows: DimensionStatRow[], meta: { dimension, since, sessionLimit, eventsCapPerSession, computedAt, fromCache } }',
+              headers: {
+                'X-Analytics-Since': { schema: { type: 'string' } },
+                'X-Analytics-Limit': { schema: { type: 'string' } },
+                'X-Analytics-Events-Cap': { schema: { type: 'string' } },
+              },
+            },
+            '400': { description: 'Thiếu/sai dimension' },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
       '/api/v1/active-users': {
         get: {
           tags: ['Analytics'],

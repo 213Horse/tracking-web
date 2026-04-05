@@ -64,3 +64,13 @@ model IdentityMapping {
   @@index([userId])
 }
 
+// Snapshot tổng hợp dimension (Phân tích chi tiết)
+model AnalyticsDimensionCache {
+  id         String   @id @default(cuid())
+  cacheKey   String   @unique
+  payload    Json
+  computedAt DateTime @default(now())
+
+  @@index([computedAt])
+}
+

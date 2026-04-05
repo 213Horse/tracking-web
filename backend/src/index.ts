@@ -1,10 +1,12 @@
 import express, { Request, Response, NextFunction } from 'express';
+import { createHash } from 'node:crypto';
 import path from 'path';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import geoip from 'geoip-lite';
 import swaggerUi from 'swagger-ui-express';
+import { aggregateDimensionStats, parseDimensionParam, type SessionAgg } from './dimension-analytics';
 import { buildOpenApiDocument } from './openapi-spec';
 
 dotenv.config();
@@ -31,6 +33,56 @@ const ANALYTICS_MAX_EVENTS_PER_SESSION = Math.min(
   Math.max(parseInt(process.env.ANALYTICS_MAX_EVENTS_PER_SESSION || '4000', 10) || 4000, 100),
   50000
 );
+/** TTL cache JSON tổng hợp dimension (giây). 0 = không cache. */
+const ANALYTICS_DIMENSION_CACHE_TTL_SEC = Math.max(
+  0,
+  parseInt(process.env.ANALYTICS_DIMENSION_CACHE_TTL_SEC || '90', 10) || 0
+);
+
+function parseAnalyticsSinceLimit(req: Request): { since: Date; limit: number } {
+  let limit = parseInt(String(req.query.limit ?? ''), 10);
+  if (Number.isNaN(limit) || limit < 1) limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
+  limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
+
+  let since: Date;
+  if (req.query.since != null && String(req.query.since).trim() !== '') {
+    since = new Date(String(req.query.since));
+    if (Number.isNaN(since.getTime())) {
+      since = new Date(Date.now() - ANALYTICS_DEFAULT_DAYS * 86400000);
+    }
+  } else {
+    since = new Date(Date.now() - ANALYTICS_DEFAULT_DAYS * 86400000);
+  }
+  return { since, limit };
+}
+
+function toSessionAggList(
+  rows: {
+    id: string;
+    visitorId: string;
+    startedAt: Date;
+    updatedAt: Date;
+    device: string | null;
+    location: string | null;
+    userAgent: string | null;
+    events: { name: string; timestamp: Date; properties: unknown }[];
+  }[]
+): SessionAgg[] {
+  return rows.map((s) => ({
+    id: s.id,
+    visitorId: s.visitorId,
+    startedAt: s.startedAt,
+    updatedAt: s.updatedAt,
+    device: s.device,
+    location: s.location,
+    userAgent: s.userAgent,
+    events: s.events.map((e) => ({
+      name: e.name,
+      timestamp: e.timestamp,
+      properties: e.properties as Record<string, unknown> | null,
+    })),
+  }));
+}
 
 if (process.env.TRUST_PROXY === '1') {
   app.set('trust proxy', 1);
@@ -123,6 +175,12 @@ app.post('/api/v1/track', apiKeyMiddleware, async (req: Request, res: Response) 
   const mergedProperties = { ...(properties || {}) };
   if (context?.url && !mergedProperties.url) {
     mergedProperties.url = context.url;
+  }
+  if (context?.referrer != null && mergedProperties.referrer == null) {
+    mergedProperties.referrer = context.referrer;
+  }
+  if (context?.language != null && mergedProperties.language == null) {
+    mergedProperties.language = context.language;
   }
 
   const ipRaw = (req.headers['x-forwarded-for'] || req.ip || context?.ip) as string;
@@ -231,19 +289,7 @@ app.post('/api/v1/identify', apiKeyMiddleware, async (req: Request, res: Respons
 
 app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res: Response) => {
   try {
-    let limit = parseInt(String(req.query.limit ?? ''), 10);
-    if (Number.isNaN(limit) || limit < 1) limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
-    limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
-
-    let since: Date;
-    if (req.query.since != null && String(req.query.since).trim() !== '') {
-      since = new Date(String(req.query.since));
-      if (Number.isNaN(since.getTime())) {
-        since = new Date(Date.now() - ANALYTICS_DEFAULT_DAYS * 86400000);
-      }
-    } else {
-      since = new Date(Date.now() - ANALYTICS_DEFAULT_DAYS * 86400000);
-    }
+    const { since, limit } = parseAnalyticsSinceLimit(req);
 
     const sessions = await prisma.session.findMany({
       where: { startedAt: { gte: since } },
@@ -263,6 +309,97 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res
     res.setHeader('X-Analytics-Events-Cap', String(ANALYTICS_MAX_EVENTS_PER_SESSION));
 
     res.json(sessions);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Tổng hợp bảng Phân tích chi tiết (Khách / Lượt xem / Phiên / Thoát / Thời gian TB).
+ * Lưu snapshot JSON trong AnalyticsDimensionCache (TTL ANALYTICS_DIMENSION_CACHE_TTL_SEC).
+ */
+app.get('/api/v1/analytics/dimension-stats', apiKeyMiddleware, async (req: Request, res: Response) => {
+  try {
+    const dimension = parseDimensionParam(req.query.dimension as string);
+    if (!dimension) {
+      return res.status(400).json({
+        error:
+          'Invalid dimension. Use: path, title, country, city, browser, os, device, language, entry, exit, referrer',
+      });
+    }
+
+    const { since, limit } = parseAnalyticsSinceLimit(req);
+    const search = String(req.query.search ?? '');
+
+    res.setHeader('X-Analytics-Since', since.toISOString());
+    res.setHeader('X-Analytics-Limit', String(limit));
+    res.setHeader('X-Analytics-Events-Cap', String(ANALYTICS_MAX_EVENTS_PER_SESSION));
+
+    const cachePayload = {
+      dimension,
+      since: since.toISOString(),
+      limit,
+      eventsCap: ANALYTICS_MAX_EVENTS_PER_SESSION,
+      search,
+    };
+    const cacheKey = createHash('sha256').update(JSON.stringify(cachePayload)).digest('hex');
+
+    if (ANALYTICS_DIMENSION_CACHE_TTL_SEC > 0) {
+      const hit = await prisma.analyticsDimensionCache.findUnique({ where: { cacheKey } });
+      if (hit && Date.now() - hit.computedAt.getTime() < ANALYTICS_DIMENSION_CACHE_TTL_SEC * 1000) {
+        const payload = hit.payload as { rows?: unknown; meta?: Record<string, unknown> };
+        return res.json({
+          ...payload,
+          meta: { ...payload.meta, fromCache: true },
+        });
+      }
+    }
+
+    const slim = await prisma.session.findMany({
+      where: { startedAt: { gte: since } },
+      select: {
+        id: true,
+        visitorId: true,
+        startedAt: true,
+        updatedAt: true,
+        device: true,
+        location: true,
+        userAgent: true,
+        events: {
+          orderBy: { timestamp: 'desc' },
+          take: ANALYTICS_MAX_EVENTS_PER_SESSION,
+          select: { name: true, timestamp: true, properties: true },
+        },
+      },
+      orderBy: { startedAt: 'desc' },
+      take: limit,
+    });
+
+    const sessionsAgg = toSessionAggList(slim);
+    const rows = aggregateDimensionStats(dimension, sessionsAgg, search);
+
+    const body = {
+      rows,
+      meta: {
+        dimension,
+        since: since.toISOString(),
+        sessionLimit: limit,
+        eventsCapPerSession: ANALYTICS_MAX_EVENTS_PER_SESSION,
+        computedAt: new Date().toISOString(),
+        fromCache: false,
+      },
+    };
+
+    if (ANALYTICS_DIMENSION_CACHE_TTL_SEC > 0) {
+      const payloadJson = JSON.parse(JSON.stringify(body)) as Prisma.InputJsonValue;
+      await prisma.analyticsDimensionCache.upsert({
+        where: { cacheKey },
+        create: { cacheKey, payload: payloadJson },
+        update: { payload: payloadJson, computedAt: new Date() },
+      });
+    }
+
+    res.json(body);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
