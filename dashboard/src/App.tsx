@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
-import { Users, MousePointer2, Clock, Search, ArrowRight, LayoutDashboard, Database, Activity, UserCheck, MapPin, Eye, Copy, User, Globe, Monitor, Timer } from 'lucide-react';
+import { Users, MousePointer2, Clock, Search, ArrowRight, LayoutDashboard, Database, Activity, MapPin, Eye, Copy, User, Globe, Monitor, Timer, ShoppingCart, Package, ListOrdered } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import { vi } from 'date-fns/locale';
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from "react-simple-maps";
@@ -49,6 +49,42 @@ interface Session {
       }
     }
   }
+}
+
+function commerceCustomerFromSession(s: Session): { label: string; title: string } {
+  const user = s.visitor.identityMapping?.user;
+  const label =
+    (user?.name && String(user.name).trim()) || user?.email || 'Chưa định danh';
+  const title = [
+    user?.name,
+    user?.email,
+    user?.erpId ? `Mã KH: ${user.erpId}` : null,
+    `Visitor: ${s.visitorId}`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  return { label, title };
+}
+
+/** Đếm mỗi lần tên SP xuất hiện trong một event (mảng productNames). */
+function tallyProductNamesFromEvents(
+  events: { properties?: Record<string, unknown> | null }[],
+  propKey: string
+): { name: string; count: number }[] {
+  const map = new Map<string, number>();
+  for (const e of events) {
+    const arr = e.properties?.[propKey];
+    if (!Array.isArray(arr)) continue;
+    for (const raw of arr) {
+      if (typeof raw !== 'string') continue;
+      const name = raw.trim();
+      if (!name) continue;
+      map.set(name, (map.get(name) || 0) + 1);
+    }
+  }
+  return [...map.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count);
 }
 
 const App = () => {
@@ -391,6 +427,55 @@ const App = () => {
     events: s.events.length
   })).reverse();
 
+  const commercePreviewRows = sessions
+    .flatMap((s) =>
+      s.events
+        .filter((e) => e.name === 'checkout_preview')
+        .map((e) => {
+          const { label, title } = commerceCustomerFromSession(s);
+          return {
+            id: e.id,
+            visitorId: s.visitorId,
+            customerLabel: label,
+            customerTitle: title,
+            at: e.timestamp,
+            products: Array.isArray(e.properties?.productNames) ? e.properties.productNames as string[] : [],
+          };
+        })
+    )
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+    .slice(0, 25);
+
+  const commerceOrderRows = sessions
+    .flatMap((s) =>
+      s.events
+        .filter((e) => e.name === 'checkout_success')
+        .map((e) => {
+          const { label, title } = commerceCustomerFromSession(s);
+          return {
+            id: e.id,
+            visitorId: s.visitorId,
+            customerLabel: label,
+            customerTitle: title,
+            at: e.timestamp,
+            orderNo: String(e.properties?.orderNo ?? ''),
+          };
+        })
+    )
+    .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
+    .slice(0, 25);
+
+  const checkoutPreviewVisitorCount = new Set(
+    sessions.filter((s) => s.events.some((e) => e.name === 'checkout_preview')).map((s) => s.visitorId)
+  ).size;
+  const checkoutSuccessCount = sessions.flatMap((s) => s.events).filter((e) => e.name === 'checkout_success').length;
+
+  const previewEventsForReport = sessions.flatMap((s) => s.events.filter((e) => e.name === 'checkout_preview'));
+  const productWantRank = tallyProductNamesFromEvents(previewEventsForReport, 'productNames');
+
+  const successEventsForReport = sessions.flatMap((s) => s.events.filter((e) => e.name === 'checkout_success'));
+  const productPurchasedRank = tallyProductNamesFromEvents(successEventsForReport, 'productNames');
+
   const allEvents = sessions.flatMap(s => s.events.map(e => ({ 
     ...e, 
     visitorId: s.visitorId, 
@@ -448,12 +533,24 @@ const App = () => {
     else if(ua.includes('Android')) os = 'Android';
     else if(ua.includes('iOS') || ua.includes('iPhone')) os = 'iOS';
 
+    const previewEvents = vEvents.filter((e) => e.name === 'checkout_preview');
+    const successOrderEvents = vEvents.filter((e) => e.name === 'checkout_success');
+    const latestPreviewProducts =
+      previewEvents.length > 0 && Array.isArray(previewEvents[0].properties?.productNames)
+        ? (previewEvents[0].properties.productNames as string[])
+        : [];
+    const orderNos = [
+      ...new Set(successOrderEvents.map((e) => e.properties?.orderNo).filter(Boolean) as string[]),
+    ];
+
     return {
       email: latest.visitor?.identityMapping?.user?.email,
       name: latest.visitor?.identityMapping?.user?.name,
       erpId: latest.visitor?.identityMapping?.user?.erpId,
       vSessions, vEvents, visits: vSessions.length, views, events: vEvents.length - views, durationSec, firstSeen, lastSeen, geo, browser, os,
-      device: latest.device?.includes('x') ? 'Desktop/Laptop' : 'Mobile'
+      device: latest.device?.includes('x') ? 'Desktop/Laptop' : 'Mobile',
+      latestPreviewProducts,
+      orderNos,
     };
   };
 
@@ -538,6 +635,176 @@ const App = () => {
                   </span>
                 </div>
               ))}
+            </div>
+
+            {/* Thương mại: preview giỏ (/thanh-toan) & đặt hàng thành công */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+              <div className="bg-[#1e293b] p-6 rounded-2xl border border-[#334155]">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <ShoppingCart className="text-amber-400 w-5 h-5" />
+                    <h3 className="text-lg font-bold text-white">Đang mua (preview /thanh-toan)</h3>
+                  </div>
+                  <span className="text-[10px] font-bold text-amber-400/90 bg-amber-500/10 px-2 py-1 rounded border border-amber-500/20">
+                    {checkoutPreviewVisitorCount} KH · {commercePreviewRows.length} lần gọi
+                  </span>
+                </div>
+                <p className="text-slate-500 text-xs mb-4">
+                  Sản phẩm lấy từ <code className="text-slate-400">cartItems[].name</code> khi API preview-orders trả về thành công.
+                </p>
+                <div className="overflow-auto max-h-[280px] border border-[#334155] rounded-xl">
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-[10px] uppercase text-slate-500 border-b border-[#334155] sticky top-0 bg-[#1e293b]">
+                      <tr>
+                        <th className="px-3 py-2">Thời điểm</th>
+                        <th className="px-3 py-2">Khách</th>
+                        <th className="px-3 py-2">Sản phẩm trong giỏ</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#334155]">
+                      {commercePreviewRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-3 py-8 text-center text-slate-500 text-xs italic">
+                            Chưa có sự kiện checkout_preview. Đảm bảo site đã gắn snippet và gọi preview-orders trên /thanh-toan.
+                          </td>
+                        </tr>
+                      ) : (
+                        commercePreviewRows.map((row) => (
+                          <tr key={row.id} className="hover:bg-[#0f172a]/80">
+                            <td className="px-3 py-2 text-slate-400 whitespace-nowrap text-[11px] font-mono">
+                              {formatFullDate(row.at)}
+                            </td>
+                            <td className="px-3 py-2 text-slate-200 text-xs font-medium truncate max-w-[200px]" title={row.customerTitle}>
+                              {row.customerLabel}
+                            </td>
+                            <td className="px-3 py-2 text-slate-200 text-xs">
+                              <div className="flex flex-wrap gap-1">
+                                {row.products.map((name, idx) => (
+                                  <span
+                                    key={`${row.id}-${idx}`}
+                                    className="inline-block bg-amber-500/15 text-amber-200/90 border border-amber-500/25 rounded px-1.5 py-0.5 text-[10px] max-w-full truncate"
+                                    title={name}
+                                  >
+                                    {name}
+                                  </span>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-6 pt-6 border-t border-[#334155]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <ListOrdered className="text-amber-400 w-4 h-4 shrink-0" />
+                    <h4 className="text-sm font-bold text-white">Báo cáo: Sản phẩm khách muốn mua</h4>
+                  </div>
+                  <p className="text-slate-500 text-[11px] mb-3">
+                    Danh sách xếp hạng theo số lần sản phẩm xuất hiện trong các lần preview giỏ (mỗi dòng trong giỏ tính một lượt).
+                  </p>
+                  <div className="max-h-[240px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                    {productWantRank.length === 0 ? (
+                      <p className="text-slate-500 text-xs italic py-2">Chưa có dữ liệu từ preview.</p>
+                    ) : (
+                      productWantRank.slice(0, 50).map((row, idx) => (
+                        <div
+                          key={row.name}
+                          className="flex justify-between items-center gap-2 text-xs bg-[#0f172a]/80 border border-[#334155] rounded-lg px-2.5 py-1.5"
+                        >
+                          <span className="text-slate-500 font-mono w-6 shrink-0 tabular-nums">{idx + 1}</span>
+                          <span className="text-slate-200 flex-1 min-w-0 truncate" title={row.name}>
+                            {row.name}
+                          </span>
+                          <span className="text-amber-400 font-bold shrink-0 tabular-nums">{row.count}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="bg-[#1e293b] p-6 rounded-2xl border border-[#334155]">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Package className="text-emerald-400 w-5 h-5" />
+                    <h3 className="text-lg font-bold text-white">Đơn hàng thành công</h3>
+                  </div>
+                  <span className="text-[10px] font-bold text-emerald-400/90 bg-emerald-500/10 px-2 py-1 rounded border border-emerald-500/20">
+                    {checkoutSuccessCount} đơn
+                  </span>
+                </div>
+                <p className="text-slate-500 text-xs mb-4">
+                  Mỗi lần API checkout thành công ghi <code className="text-slate-400">orderNo</code> và{' '}
+                  <code className="text-slate-400">productNames</code> (nếu response có danh sách dòng hàng).
+                </p>
+                <div className="overflow-auto max-h-[280px] border border-[#334155] rounded-xl">
+                  <table className="w-full text-left text-sm">
+                    <thead className="text-[10px] uppercase text-slate-500 border-b border-[#334155] sticky top-0 bg-[#1e293b]">
+                      <tr>
+                        <th className="px-3 py-2">Thời điểm</th>
+                        <th className="px-3 py-2">Khách</th>
+                        <th className="px-3 py-2">Mã đơn</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#334155]">
+                      {commerceOrderRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={3} className="px-3 py-8 text-center text-slate-500 text-xs italic">
+                            Chưa có sự kiện checkout_success.
+                          </td>
+                        </tr>
+                      ) : (
+                        commerceOrderRows.map((row) => (
+                          <tr key={row.id} className="hover:bg-[#0f172a]/80">
+                            <td className="px-3 py-2 text-slate-400 whitespace-nowrap text-[11px] font-mono">
+                              {formatFullDate(row.at)}
+                            </td>
+                            <td className="px-3 py-2 text-slate-200 text-xs font-medium truncate max-w-[200px]" title={row.customerTitle}>
+                              {row.customerLabel}
+                            </td>
+                            <td className="px-3 py-2 text-emerald-300 font-mono text-xs font-bold">{row.orderNo}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="mt-6 pt-6 border-t border-[#334155]">
+                  <div className="flex items-center gap-2 mb-2">
+                    <ListOrdered className="text-emerald-400 w-4 h-4 shrink-0" />
+                    <h4 className="text-sm font-bold text-white">Báo cáo: Sản phẩm mua nhiều</h4>
+                  </div>
+                  <p className="text-slate-500 text-[11px] mb-3">
+                    Xếp hạng theo số lần sản phẩm xuất hiện trong các đơn hoàn tất (mỗi dòng trong đơn tính một lượt).
+                  </p>
+                  <div className="max-h-[240px] overflow-y-auto space-y-1.5 pr-1 custom-scrollbar">
+                    {productPurchasedRank.length === 0 ? (
+                      <p className="text-slate-500 text-xs italic py-2">
+                        Chưa có tên sản phẩm trong sự kiện đặt hàng. Cập nhật snippet mới: tracker sẽ đọc tên từ response checkout
+                        (cartItems, items, orderItems, …). Đơn cũ chỉ có <code className="text-slate-400">orderNo</code> sẽ không
+                        vào thống kê này.
+                      </p>
+                    ) : (
+                      productPurchasedRank.slice(0, 50).map((row, idx) => (
+                        <div
+                          key={row.name}
+                          className="flex justify-between items-center gap-2 text-xs bg-[#0f172a]/80 border border-[#334155] rounded-lg px-2.5 py-1.5"
+                        >
+                          <span className="text-slate-500 font-mono w-6 shrink-0 tabular-nums">{idx + 1}</span>
+                          <span className="text-slate-200 flex-1 min-w-0 truncate" title={row.name}>
+                            {row.name}
+                          </span>
+                          <span className="text-emerald-400 font-bold shrink-0 tabular-nums">{row.count}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
 
             {/* Geo & Heatmap Grid */}
@@ -1121,6 +1388,45 @@ const App = () => {
                 </div>
               </div>
 
+              {(vp.latestPreviewProducts.length > 0 || vp.orderNos.length > 0) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                  {vp.latestPreviewProducts.length > 0 && (
+                    <div className="rounded-2xl p-5 border border-amber-100 bg-amber-50/40 shadow-sm">
+                      <div className="flex items-center gap-2 text-amber-800 font-bold text-xs uppercase tracking-wider mb-3">
+                        <ShoppingCart size={16} />
+                        Sản phẩm đang mua (mới nhất)
+                      </div>
+                      <ul className="space-y-1.5 text-sm text-slate-800">
+                        {vp.latestPreviewProducts.map((n, i) => (
+                          <li key={i} className="flex gap-2">
+                            <span className="text-amber-600 font-bold">·</span>
+                            <span>{n}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {vp.orderNos.length > 0 && (
+                    <div className="rounded-2xl p-5 border border-emerald-100 bg-emerald-50/40 shadow-sm">
+                      <div className="flex items-center gap-2 text-emerald-800 font-bold text-xs uppercase tracking-wider mb-3">
+                        <Package size={16} />
+                        Mã đơn hàng
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {vp.orderNos.map((no) => (
+                          <span
+                            key={no}
+                            className="font-mono text-xs font-bold bg-white border border-emerald-200 text-emerald-800 px-2.5 py-1 rounded-lg"
+                          >
+                            {no}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Stats Grid */}
               <div className="grid grid-cols-4 gap-4 mb-8">
                 <div className="bg-white rounded-2xl p-6 border border-slate-100 shadow-[0_2px_10px_-4px_rgba(0,0,0,0.1)] flex flex-col items-center text-center">
@@ -1210,26 +1516,51 @@ const App = () => {
                         <div className="w-24 mt-1 text-slate-400 text-[10px] font-bold text-right shrink-0 font-mono tracking-tighter">
                           {format(new Date(evt.timestamp), 'hh:mm:ss a')}
                         </div>
-                        <div className="bg-slate-50 border border-slate-100 rounded-lg p-3 w-full flex justify-between items-center group hover:border-slate-300 transition-colors">
-                          <div className="flex items-center gap-3 w-full">
-                            <Eye size={16} className="text-slate-400 shrink-0" />
-                            <span className="text-slate-500 text-xs font-semibold shrink-0">{evt.name === 'pageview' ? 'Viewed page' : 'Triggered'}</span>
-                            <span className="text-slate-900 text-xs font-bold font-mono bg-white px-2 py-0.5 rounded border border-slate-200 truncate">
-                              {evt.properties?.title || evt.name}
-                            </span>
-                            {evt.properties?.url && (
-                              <span className="text-slate-400 text-[10px] font-mono border-l border-slate-200 pl-3 ml-1 truncate max-w-[200px]" title={evt.properties.url}>
-                                {(() => {
-                                  try { return new URL(evt.properties.url).pathname + new URL(evt.properties.url).search } 
-                                  catch(e) { return evt.properties.url }
-                                })()}
+                        <div className="bg-slate-50 border border-slate-100 rounded-lg p-3 w-full flex flex-col gap-2 group hover:border-slate-300 transition-colors">
+                          <div className="flex justify-between items-center w-full">
+                            <div className="flex items-center gap-3 w-full min-w-0">
+                              <Eye size={16} className="text-slate-400 shrink-0" />
+                              <span className="text-slate-500 text-xs font-semibold shrink-0">
+                                {evt.name === 'pageview'
+                                  ? 'Viewed page'
+                                  : evt.name === 'checkout_preview'
+                                    ? 'Giỏ thanh toán'
+                                    : evt.name === 'checkout_success'
+                                      ? 'Đặt hàng'
+                                      : 'Triggered'}
+                              </span>
+                              <span className="text-slate-900 text-xs font-bold font-mono bg-white px-2 py-0.5 rounded border border-slate-200 truncate">
+                                {evt.name === 'checkout_success' && evt.properties?.orderNo
+                                  ? `orderNo: ${evt.properties.orderNo}`
+                                  : evt.properties?.title || evt.name}
+                              </span>
+                              {evt.properties?.url && (
+                                <span className="text-slate-400 text-[10px] font-mono border-l border-slate-200 pl-3 ml-1 truncate max-w-[200px]" title={evt.properties.url}>
+                                  {(() => {
+                                    try { return new URL(evt.properties.url).pathname + new URL(evt.properties.url).search } 
+                                    catch(e) { return evt.properties.url }
+                                  })()}
+                                </span>
+                              )}
+                            </div>
+                            {evt.properties?.utm_source && (
+                              <span className="text-[9px] bg-indigo-50 border border-indigo-100 text-indigo-500 font-bold px-2 py-1 rounded-full uppercase shrink-0">
+                                src: {evt.properties.utm_source}
                               </span>
                             )}
                           </div>
-                          {evt.properties?.utm_source && (
-                            <span className="text-[9px] bg-indigo-50 border border-indigo-100 text-indigo-500 font-bold px-2 py-1 rounded-full uppercase">
-                              src: {evt.properties.utm_source}
-                            </span>
+                          {evt.name === 'checkout_preview' && Array.isArray(evt.properties?.productNames) && evt.properties.productNames.length > 0 && (
+                            <div className="flex flex-wrap gap-1 pl-7">
+                              {(evt.properties.productNames as string[]).map((n: string, pi: number) => (
+                                <span
+                                  key={pi}
+                                  className="text-[9px] bg-amber-100 text-amber-900 border border-amber-200 px-1.5 py-0.5 rounded max-w-full truncate"
+                                  title={n}
+                                >
+                                  {n}
+                                </span>
+                              ))}
+                            </div>
                           )}
                         </div>
                       </div>

@@ -50,6 +50,74 @@
     return utms;
   };
 
+  const isBookmediApiUrl = (url) => typeof url === 'string' && url.indexOf('bookmedi.io.vn') !== -1;
+  const isThanhToanPage = () => {
+    try {
+      return (window.location.pathname || '').indexOf('thanh-toan') !== -1;
+    } catch (e) { return false; }
+  };
+  const unwrapPayload = (data) => {
+    if (!data || typeof data !== 'object') return null;
+    return data.data !== undefined ? data.data : data;
+  };
+  const cartItemNamesFromPayload = (payload) => {
+    const items = payload && (payload.cartItems || payload.cart_items);
+    if (!Array.isArray(items)) return [];
+    return items.map(function(i) { return i && i.name; }).filter(Boolean);
+  };
+  const lineItemName = (item) => {
+    if (!item || typeof item !== 'object') return null;
+    var n = item.name || item.productName || item.product_name || item.title;
+    if (n) return n;
+    if (item.product && typeof item.product === 'object') {
+      return item.product.name || item.product.title || null;
+    }
+    return null;
+  };
+  const productNamesFromOrderPayload = (payload) => {
+    if (!payload || typeof payload !== 'object') return [];
+    var keys = ['cartItems', 'cart_items', 'items', 'orderItems', 'order_items', 'lines', 'orderDetails', 'details'];
+    for (var i = 0; i < keys.length; i++) {
+      var arr = payload[keys[i]];
+      if (Array.isArray(arr)) {
+        var names = arr.map(lineItemName).filter(Boolean);
+        if (names.length) return names;
+      }
+    }
+    return [];
+  };
+  const orderNoFromPayload = (payload) => {
+    if (!payload || typeof payload !== 'object') return null;
+    var n = payload.orderNo != null ? payload.orderNo : payload.order_no;
+    if (n == null || n === '') return null;
+    return String(n);
+  };
+  const handleBookmediCommerceResponse = (url, ok, data) => {
+    if (!isInitialized || !ok || !isBookmediApiUrl(url)) return;
+    if (url.indexOf('preview-orders') !== -1 && isThanhToanPage()) {
+      var inner = unwrapPayload(data);
+      var names = cartItemNamesFromPayload(inner || data);
+      if (names.length) {
+        tracker.track('checkout_preview', {
+          productNames: names,
+          pagePath: window.location.pathname
+        });
+      }
+    }
+    if (url.indexOf('/api/checkout') !== -1) {
+      var inner2 = unwrapPayload(data);
+      var orderNo = orderNoFromPayload(inner2) || orderNoFromPayload(data);
+      if (orderNo) {
+        var boughtNames = productNamesFromOrderPayload(inner2);
+        if (!boughtNames.length) boughtNames = productNamesFromOrderPayload(data);
+        tracker.track('checkout_success', {
+          orderNo: orderNo,
+          productNames: boughtNames
+        });
+      }
+    }
+  };
+
   const tracker = {
     init: function(config) {
       if (config.endpoint) CONFIG.endpoint = config.endpoint;
@@ -162,6 +230,7 @@
                 erpId: erpData.erpId
               });
             }
+            handleBookmediCommerceResponse(url, response.ok, data);
           }).catch(() => {});
         }
       } catch(e) {}
@@ -173,6 +242,7 @@
   if (originalXHR) {
     const originalOpen = originalXHR.prototype.open;
     originalXHR.prototype.open = function(method, url, ...rest) {
+      this._bm_track_url = typeof url === 'string' ? url : '';
       if (typeof url === 'string' && url.includes('/api/')) {
         this.addEventListener('load', function() {
           try {
@@ -187,6 +257,9 @@
                 erpId: erpData.erpId
               });
             }
+            var xhrUrl = this._bm_track_url || '';
+            var ok = this.status >= 200 && this.status < 300;
+            handleBookmediCommerceResponse(xhrUrl, ok, rawData);
           } catch(e) {}
         });
       }
