@@ -45,6 +45,11 @@ app.use(
 );
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
 
+/** Liveness: không cần API key (monitoring, Nginx, curl sau deploy). */
+app.get('/health', (_req, res) => {
+  res.status(200).json({ ok: true });
+});
+
 if (!IS_PROD) {
   app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);

@@ -1,4 +1,4 @@
-# Build & push backend → GHCR | rsync deploy/ | tạo .env từ secrets | docker compose up
+# Build & push backend → GHCR | rsync deploy/ | tạo .env từ secrets | docker compose up | prune ảnh/cache thừa
 # Server: CHỈ cần Docker (+ user trong group docker). Không clone repo.
 #
 # Secrets (bắt buộc):
@@ -145,3 +145,8 @@ jobs:
             DC -f deploy/docker-compose.yml --env-file deploy/.env pull
             DC -f deploy/docker-compose.yml --env-file deploy/.env up -d
             DC -f deploy/docker-compose.yml ps
+            # Sau mỗi deploy: bỏ container dừng + image không còn được container nào dùng (ảnh backend cũ, layer thừa)
+            echo "=== Dọn Docker (nhẹ disk) ==="
+            docker container prune -f || true
+            docker image prune -af || true
+            docker builder prune -af -f 2>/dev/null || true
