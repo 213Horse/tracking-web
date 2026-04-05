@@ -15,6 +15,16 @@ const isoToId: { [key: string]: string } = {
 
 const idToIso: { [key: string]: string } = Object.fromEntries(Object.entries(isoToId).map(([k, v]) => [v, k]));
 
+const TRACKING_API_BASE = import.meta.env.VITE_TRACKING_API || 'http://localhost:3001';
+const ANALYTICS_WINDOW_DAYS = Math.min(
+  Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_DAYS || '30'), 10) || 30, 1),
+  365
+);
+const ANALYTICS_SESSION_LIMIT = Math.min(
+  Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_LIMIT || '8000'), 10) || 8000, 100),
+  50000
+);
+
 interface Event {
   id: string;
   name: string;
@@ -99,6 +109,7 @@ const App = () => {
   const [activeAnalysisTab, setActiveAnalysisTab] = useState<string>('Đường dẫn');
   const [analysisSearch, setAnalysisSearch] = useState<string>('');
   const [mapTooltip, setMapTooltip] = useState<string | null>(null);
+  const [analyticsHint, setAnalyticsHint] = useState<string | null>(null);
 
   const formatDate = (date: string | Date) => {
     try {
@@ -134,12 +145,43 @@ const App = () => {
 
   useEffect(() => {
     const fetchData = () => {
-      fetch('http://localhost:3001/api/v1/analytics/sessions')
-        .then(res => res.json())
-        .then(data => setSessions(data))
-        .catch(err => console.error(err));
+      const since = new Date();
+      since.setDate(since.getDate() - ANALYTICS_WINDOW_DAYS);
+      const qs = new URLSearchParams({
+        since: since.toISOString(),
+        limit: String(ANALYTICS_SESSION_LIMIT),
+      });
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}`)
+        .then((res) => {
+          const cap = res.headers.get('X-Analytics-Events-Cap');
+          const lim = res.headers.get('X-Analytics-Limit');
+          const sinceH = res.headers.get('X-Analytics-Since');
+          if (sinceH && lim && cap) {
+            try {
+              const d = new Date(sinceH);
+              setAnalyticsHint(
+                `Cửa sổ dữ liệu: từ ${formatFullDate(d)} · tối đa ${lim} phiên · tối đa ${cap} sự kiện/phiên (ưu tiên mới nhất).`
+              );
+            } catch {
+              setAnalyticsHint(null);
+            }
+          }
+          return res.json();
+        })
+        .then((data: Session[]) => {
+          const normalized = Array.isArray(data)
+            ? data.map((s) => ({
+                ...s,
+                events: [...s.events].sort(
+                  (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+                ),
+              }))
+            : [];
+          setSessions(normalized);
+        })
+        .catch((err) => console.error(err));
 
-      fetch('http://localhost:3001/api/v1/active-users')
+      fetch(`${TRACKING_API_BASE}/api/v1/active-users`)
         .then(res => res.json())
         .then(data => {
           setActiveUsers(prev => {
@@ -599,6 +641,9 @@ const App = () => {
               <span className="px-2 py-0.5 bg-slate-800 text-slate-400 text-[10px] rounded border border-slate-700">GMT+7</span>
             </div>
             <p className="text-slate-400">Real-time behavior tracking data</p>
+            {analyticsHint && (
+              <p className="text-amber-200/80 text-xs mt-2 max-w-3xl leading-relaxed">{analyticsHint}</p>
+            )}
           </div>
           <div className="flex gap-4">
             <div className="relative">

@@ -201,12 +201,8 @@
     }
   };
 
-  // Heartbeat every 30 seconds to stay "active"
-  setInterval(() => {
-    if (isInitialized) {
-      tracker.track('heartbeat', { type: 'keep_alive' });
-    }
-  }, 30000);
+  // Chỉ dùng POST /ping (startHeartbeat) để cập nhật "đang online" — không gửi thêm event heartbeat
+  // để giảm ~50% tải ghi DB so với ping + track('heartbeat').
 
   // --- Auto Interceptor for Bookmedi API (Universal Sniffing) ---
   const originalFetch = window.fetch;
