@@ -1,0 +1,47 @@
+# Backend + Postgres trong Docker — KHÔNG chiếm port 80 (để Nginx sẵn có trên host).
+# Nginx host proxy tới http://127.0.0.1:6510 — xem deploy/nginx/host/ và deploy/SETUP_EXISTING_NGINX_HTTPS.md
+#
+# docker ps (ví dụ):
+#   127.0.0.1:6510->6510/tcp   (backend)
+#   127.0.0.1:6511->5432/tcp   (postgres)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: tracking-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-tracking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-tracking_db}
+    ports:
+      - "127.0.0.1:6511:5432"
+    volumes:
+      - tracking_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    image: ${TRACKING_BACKEND_IMAGE:?set TRACKING_BACKEND_IMAGE in .env}
+    container_name: tracking-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: "6510"
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tracking}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tracking_db}?schema=public
+      TRACKING_API_KEY: ${TRACKING_API_KEY:?set TRACKING_API_KEY}
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-https://tracking.david.io.vn}
+      TRUST_PROXY: "1"
+      ENABLE_SWAGGER: ${ENABLE_SWAGGER:-1}
+      SNIPPET_DIR: /app/snippet
+    ports:
+      - "127.0.0.1:6510:6510"
+
+volumes:
+  tracking_pgdata:

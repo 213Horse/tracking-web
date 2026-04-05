@@ -1,0 +1,12 @@
+# Dùng khi build context = thư mục gốc repo (-f backend/Dockerfile .)
+# File này nằm trong backend/ — Docker đọc .dockerignore tại context root;
+# tạo thêm /.dockerignore ở root nếu cần loại trừ rộng hơn.
+
+node_modules
+dist
+.env
+.env.*
+*.log
+npm-debug.log*
+.git
+.gitignore

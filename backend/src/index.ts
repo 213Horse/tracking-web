@@ -4,6 +4,8 @@ import { PrismaClient } from '@prisma/client';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import geoip from 'geoip-lite';
+import swaggerUi from 'swagger-ui-express';
+import { buildOpenApiDocument } from './openapi-spec';
 
 dotenv.config();
 
@@ -11,8 +13,10 @@ const app = express();
 const prisma = new PrismaClient();
 
 const PORT = process.env.PORT || 3001;
+/** Khóa cố định: đặt TRACKING_API_KEY trong .env (production bắt buộc đổi khỏi default). */
 const API_KEY = process.env.TRACKING_API_KEY || 'default_secret_key';
 const IS_PROD = process.env.NODE_ENV === 'production';
+const API_PUBLIC_BASE = (process.env.API_PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
 
 /** Mặc định chỉ tải phiên trong N ngày gần đây (tránh OOM). */
 const ANALYTICS_DEFAULT_DAYS = Math.min(
@@ -48,10 +52,27 @@ if (!IS_PROD) {
   });
 }
 
-app.use('/snippet', express.static(path.join(__dirname, '../../snippet')));
+const snippetStaticDir =
+  process.env.SNIPPET_DIR != null && process.env.SNIPPET_DIR !== ''
+    ? path.resolve(process.env.SNIPPET_DIR)
+    : path.join(__dirname, '../../snippet');
+app.use('/snippet', express.static(snippetStaticDir));
+
+if (IS_PROD && API_KEY === 'default_secret_key') {
+  console.warn('[security] TRACKING_API_KEY đang là default — hãy đặt khóa mạnh trong production.');
+}
+
+const openApiDocument = buildOpenApiDocument(API_PUBLIC_BASE);
+if (process.env.ENABLE_SWAGGER !== '0') {
+  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(openApiDocument, { swaggerOptions: { persistAuthorization: true } }));
+  app.get('/openapi.json', (_req, res) => {
+    res.json(openApiDocument);
+  });
+}
 
 const apiKeyMiddleware = (req: Request, res: Response, next: NextFunction) => {
-  const key = req.headers['x-api-key'];
+  const raw = req.headers['x-api-key'];
+  const key = Array.isArray(raw) ? raw[0] : raw;
   if (key !== API_KEY) {
     return res.status(401).json({ error: 'Unauthorized: Invalid API Key' });
   }
@@ -203,7 +224,7 @@ app.post('/api/v1/identify', apiKeyMiddleware, async (req: Request, res: Respons
   }
 });
 
-app.get('/api/v1/analytics/sessions', async (req: Request, res: Response) => {
+app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res: Response) => {
   try {
     let limit = parseInt(String(req.query.limit ?? ''), 10);
     if (Number.isNaN(limit) || limit < 1) limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
@@ -242,7 +263,7 @@ app.get('/api/v1/analytics/sessions', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/v1/active-users', async (req, res) => {
+app.get('/api/v1/active-users', apiKeyMiddleware, async (req, res) => {
   try {
     const activeWindow = new Date(Date.now() - 60 * 1000);
     const count = await prisma.session.count({
@@ -286,6 +307,9 @@ app.post('/api/v1/session-end', apiKeyMiddleware, async (req, res) => {
 
 const server = app.listen(PORT, () => {
   console.log(`Tracking server on port ${PORT} (analytics window default ${ANALYTICS_DEFAULT_DAYS}d, max ${ANALYTICS_MAX_LIMIT} sessions)`);
+  if (process.env.ENABLE_SWAGGER !== '0') {
+    console.log(`Swagger UI: ${API_PUBLIC_BASE}/api-docs   | OpenAPI JSON: ${API_PUBLIC_BASE}/openapi.json`);
+  }
 });
 
 const shutdown = () => {

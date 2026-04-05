@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+*.log
+
+# Deploy secrets trên máy local / server (không commit)
+deploy/.env

@@ -1,0 +1,133 @@
+# Build & push backend → GHCR | rsync deploy/ | tạo .env từ secrets | docker compose up
+# Server: CHỈ cần Docker (+ user trong group docker). Không clone repo.
+#
+# Secrets (bắt buộc):
+#   DEPLOY_HOST, DEPLOY_USER, DEPLOY_SSH_KEY
+#   DEPLOY_POSTGRES_PASSWORD, DEPLOY_TRACKING_API_KEY
+# Tùy chọn:
+#   DEPLOY_PATH (mặc định /opt/tracking)
+#   GHCR_PULL_TOKEN (image GHCR private)
+#   DEPLOY_API_PUBLIC_URL (mặc định https://tracking.david.io.vn)
+
+name: Deploy backend + DB (Docker)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'deploy/**'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch: {}
+
+env:
+  IMAGE_NAME: tracking-backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_lower: ${{ steps.img.outputs.image_lower }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tên image GHCR (chữ thường)
+        id: img
+        run: |
+          OWNER_REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "image_lower=ghcr.io/${OWNER_REPO_LOWER}/${{ env.IMAGE_NAME }}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.img.outputs.image_lower }}:latest
+            ${{ steps.img.outputs.image_lower }}:${{ github.sha }}
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Kiểm tra secrets deploy
+        run: |
+          test -n "${{ secrets.DEPLOY_POSTGRES_PASSWORD }}" || { echo "Thiếu secret DEPLOY_POSTGRES_PASSWORD"; exit 1; }
+          test -n "${{ secrets.DEPLOY_TRACKING_API_KEY }}" || { echo "Thiếu secret DEPLOY_TRACKING_API_KEY"; exit 1; }
+
+      - name: Tạo thư mục trên server
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          REMOTE_BASE: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -e
+          test -n "$SSH_KEY" && test -n "$HOST" && test -n "$USER" || { echo "Thiếu DEPLOY_HOST / DEPLOY_USER / DEPLOY_SSH_KEY"; exit 1; }
+          BASE="${REMOTE_BASE:-/opt/tracking}"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$SSH_KEY" | tr -d '\r' > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new "${USER}@${HOST}" "mkdir -p '${BASE}/deploy'"
+
+      - name: Rsync deploy/ lên server
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER: ${{ secrets.DEPLOY_USER }}
+          REMOTE_BASE: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -e
+          BASE="${REMOTE_BASE:-/opt/tracking}"
+          rsync -avz \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=accept-new" \
+            ./deploy/ "${USER}@${HOST}:${BASE}/deploy/"
+
+      - name: Ghi .env, pull image, docker compose up
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          IMAGE_LOWER: ${{ needs.build-and-push.outputs.image_lower }}
+          POSTGRES_PASSWORD_VAL: ${{ secrets.DEPLOY_POSTGRES_PASSWORD }}
+          TRACKING_API_KEY_VAL: ${{ secrets.DEPLOY_TRACKING_API_KEY }}
+          API_PUBLIC_URL_VAL: ${{ secrets.DEPLOY_API_PUBLIC_URL }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          envs: IMAGE_LOWER,POSTGRES_PASSWORD_VAL,TRACKING_API_KEY_VAL,API_PUBLIC_URL_VAL
+          script: |
+            set -e
+            DP="${{ secrets.DEPLOY_PATH }}"
+            DP="${DP:-/opt/tracking}"
+            mkdir -p "$DP/deploy"
+            cd "$DP"
+            API_URL="${API_PUBLIC_URL_VAL:-https://tracking.david.io.vn}"
+            umask 077
+            printf '%s\n' \
+              "TRACKING_BACKEND_IMAGE=${IMAGE_LOWER}:latest" \
+              "POSTGRES_USER=tracking" \
+              "POSTGRES_PASSWORD=${POSTGRES_PASSWORD_VAL}" \
+              "POSTGRES_DB=tracking_db" \
+              "TRACKING_API_KEY=${TRACKING_API_KEY_VAL}" \
+              "API_PUBLIC_URL=${API_URL}" \
+              "ENABLE_SWAGGER=1" \
+              > deploy/.env
+            if [ -n "${{ secrets.GHCR_PULL_TOKEN }}" ]; then
+              echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            fi
+            docker compose -f deploy/docker-compose.yml --env-file deploy/.env pull
+            docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
+            docker compose -f deploy/docker-compose.yml ps

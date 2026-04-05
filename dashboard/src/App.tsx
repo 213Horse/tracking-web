@@ -16,6 +16,8 @@ const isoToId: { [key: string]: string } = {
 const idToIso: { [key: string]: string } = Object.fromEntries(Object.entries(isoToId).map(([k, v]) => [v, k]));
 
 const TRACKING_API_BASE = import.meta.env.VITE_TRACKING_API || 'http://localhost:3001';
+/** Trùng với TRACKING_API_KEY trên backend (snippet & dashboard). */
+const TRACKING_API_KEY = import.meta.env.VITE_TRACKING_API_KEY || 'default_secret_key';
 const ANALYTICS_WINDOW_DAYS = Math.min(
   Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_DAYS || '30'), 10) || 30, 1),
   365
@@ -151,7 +153,9 @@ const App = () => {
         since: since.toISOString(),
         limit: String(ANALYTICS_SESSION_LIMIT),
       });
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}`)
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      })
         .then((res) => {
           const cap = res.headers.get('X-Analytics-Events-Cap');
           const lim = res.headers.get('X-Analytics-Limit');
@@ -181,7 +185,9 @@ const App = () => {
         })
         .catch((err) => console.error(err));
 
-      fetch(`${TRACKING_API_BASE}/api/v1/active-users`)
+      fetch(`${TRACKING_API_BASE}/api/v1/active-users`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      })
         .then(res => res.json())
         .then(data => {
           setActiveUsers(prev => {
