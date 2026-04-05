@@ -128,6 +128,16 @@ jobs:
             if [ -n "${{ secrets.GHCR_PULL_TOKEN }}" ]; then
               echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
             fi
-            docker compose -f deploy/docker-compose.yml --env-file deploy/.env pull
-            docker compose -f deploy/docker-compose.yml --env-file deploy/.env up -d
-            docker compose -f deploy/docker-compose.yml ps
+            # V2: docker compose | V1: docker-compose (một số VPS chỉ có một trong hai)
+            if docker compose version >/dev/null 2>&1; then
+              DC() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              DC() { docker-compose "$@"; }
+            else
+              echo "Thiếu Docker Compose. Trên server chạy: sudo apt install -y docker-compose-plugin"
+              echo "Hoặc: sudo apt install -y docker-compose"
+              exit 1
+            fi
+            DC -f deploy/docker-compose.yml --env-file deploy/.env pull
+            DC -f deploy/docker-compose.yml --env-file deploy/.env up -d
+            DC -f deploy/docker-compose.yml ps

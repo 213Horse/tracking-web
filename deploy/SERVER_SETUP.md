@@ -21,6 +21,9 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 sudo apt update
 sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
+# Bắt buộc có một trong hai: `docker compose` (plugin) hoặc lệnh `docker-compose`
+docker compose version || sudo apt install -y docker-compose
+
 sudo usermod -aG docker "$USER"
 # Đăng xuất SSH vào lại để nhóm docker có hiệu lực
 ```
