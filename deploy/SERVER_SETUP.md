@@ -62,7 +62,7 @@ Copy **private key** (toàn bộ) vào GitHub secret **`DEPLOY_SSH_KEY`**.
 | `DEPLOY_POSTGRES_PASSWORD` | Có | Mật khẩu PostgreSQL (workflow ghi vào `.env` mỗi lần deploy) |
 | `DEPLOY_TRACKING_API_KEY` | Có | `TRACKING_API_KEY` cho API / snippet |
 | `DEPLOY_PATH` | Không | Mặc định `/opt/tracking` |
-| `GHCR_PULL_TOKEN` | Nếu image **private** | PAT quyền `read:packages` |
+| `GHCR_PULL_TOKEN` | Nếu package GHCR **private** | PAT (Classic) quyền **`read:packages`**. Đăng nhập: user = **username GitHub chữ thường** (workflow đã xử lý). **Hoặc** vào GitHub → **Packages** → package `tracking-backend` → **Package settings** → đổi **Visibility** sang **Public** để không cần token. |
 | `DEPLOY_API_PUBLIC_URL` | Không | Mặc định `https://tracking.david.io.vn` |
 
 Workflow **tự tạo** `deploy/.env` trên server (ghi đè mỗi lần deploy). Bạn **không** cần tạo file `.env` tay trên server.

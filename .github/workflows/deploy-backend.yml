@@ -125,8 +125,12 @@ jobs:
               "API_PUBLIC_URL=${API_URL}" \
               "ENABLE_SWAGGER=1" \
               > deploy/.env
+            # GHCR: package private → bắt buộc PAT (secret GHCR_PULL_TOKEN). Public → không cần login.
+            GH_USER=$(echo '${{ github.actor }}' | tr '[:upper:]' '[:lower:]')
             if [ -n "${{ secrets.GHCR_PULL_TOKEN }}" ]; then
-              echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+              echo "${{ secrets.GHCR_PULL_TOKEN }}" | docker login ghcr.io -u "$GH_USER" --password-stdin
+            else
+              echo ":: Nếu pull bị denied — đặt package ghcr.io thành Public hoặc thêm secret GHCR_PULL_TOKEN (PAT read:packages)"
             fi
             # V2: docker compose | V1: docker-compose (một số VPS chỉ có một trong hai)
             if docker compose version >/dev/null 2>&1; then
