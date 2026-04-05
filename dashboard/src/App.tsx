@@ -3,13 +3,28 @@ import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, L
 import { Users, MousePointer2, Clock, Search, ArrowRight, LayoutDashboard, Database, Activity, UserCheck, MapPin, Eye, Copy, User, Globe, Monitor, Timer } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import { vi } from 'date-fns/locale';
+import { ComposableMap, Geographies, Geography, ZoomableGroup } from "react-simple-maps";
+
+// World map geojson URL
+const geoUrl = "https://unpkg.com/world-atlas@2.0.2/countries-110m.json";
+
+// Mapping ISO-2 to world-atlas numeric IDs
+const isoToId: { [key: string]: string } = {
+  "VN": "704", "US": "840", "GB": "826", "CN": "156", "JP": "392", "KR": "410", "FR": "250", "DE": "276", "IN": "356", "RU": "643"
+};
+
+const idToIso: { [key: string]: string } = Object.fromEntries(Object.entries(isoToId).map(([k, v]) => [v, k]));
 
 interface Event {
   id: string;
   name: string;
+  sessionId: string;
   timestamp: string;
   properties: any;
   context?: any;
+  userName?: string;
+  userEmail?: string;
+  erpId?: string;
 }
 
 interface Session {
@@ -47,6 +62,7 @@ const App = () => {
   // Interactive Analysis Block State
   const [activeAnalysisTab, setActiveAnalysisTab] = useState<string>('Đường dẫn');
   const [analysisSearch, setAnalysisSearch] = useState<string>('');
+  const [mapTooltip, setMapTooltip] = useState<string | null>(null);
 
   const formatDate = (date: string | Date) => {
     try {
@@ -104,6 +120,35 @@ const App = () => {
   }, []);
 
   const activeUsersTrend = prevActiveUsers === 0 ? (activeUsers > 0 ? 100 : 0) : ((activeUsers - prevActiveUsers) / prevActiveUsers) * 100;
+
+  // Heatmap Aggregation (7 days x 24 hours)
+  const heatmapData = Array.from({ length: 7 }, () => Array(24).fill(0));
+  const countryStats = new Map();
+
+  sessions.forEach(s => {
+    const d = new Date(s.startedAt);
+    // Convert to GMT+7 manually for matrix indexing if needed, but JS Date uses local by default for getHours
+    // To be precise for Vietnam time:
+    const vnTime = new Date(d.toLocaleString("en-US", { timeZone: "Asia/Ho_Chi_Minh" }));
+    
+    // JS getDay(): 0 is Sunday, 1 is Monday.
+    // Map to Thứ 2 (0) -> CN (6)
+    let dayIdx = vnTime.getDay(); 
+    dayIdx = dayIdx === 0 ? 6 : dayIdx - 1; 
+    
+    const hourIdx = vnTime.getHours();
+    heatmapData[dayIdx][hourIdx] += 1;
+
+    // Geo aggregation
+    if (s.location) {
+      try {
+        const geo = JSON.parse(s.location);
+        if (geo.country) {
+          countryStats.set(geo.country, (countryStats.get(geo.country) || 0) + 1);
+        }
+      } catch(e) {}
+    }
+  });
 
   // Advanced Top Level Metrics
   const pageviewsCount = sessions.flatMap(s => s.events).filter(e => e.name === 'pageview').length;
@@ -495,8 +540,117 @@ const App = () => {
               ))}
             </div>
 
-            {/* Charts & Tables */}
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            {/* Geo & Heatmap Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+              {/* World Map */}
+              <div className="lg:col-span-2 bg-[#1e293b] p-6 rounded-2xl border border-[#334155]">
+                <div className="flex justify-between items-center mb-6">
+                  <h3 className="text-lg font-bold text-white">Geographical Distribution</h3>
+                  <div className="flex gap-2">
+                     <span className="text-[10px] text-slate-500 bg-slate-800 px-2 py-1 rounded">Global Coverage</span>
+                  </div>
+                </div>
+                <div className="h-[350px] w-full overflow-hidden cursor-move relative">
+                  <ComposableMap projectionConfig={{ scale: 150 }} style={{ width: "100%", height: "100%" }}>
+                    <ZoomableGroup center={[105, 15]} zoom={1}>
+                      <Geographies geography={geoUrl}>
+                        {({ geographies }: { geographies: any[] }) =>
+                          geographies.map((geo: any) => {
+                            // Map ID (like 704) back to ISO (VN) for matching with countryStats
+                            const isoCode = idToIso[geo.id] || geo.id;
+                            const sessions = countryStats.get(isoCode) || 0;
+                            const hasTraffic = sessions > 0 || countryStats.has(geo.properties.name);
+                            
+                            return (
+                              <Geography
+                                key={geo.rsmKey}
+                                geography={geo}
+                                onMouseEnter={() => {
+                                  setMapTooltip(`${geo.properties.name}: ${sessions} sessions`);
+                                }}
+                                onMouseLeave={() => {
+                                  setMapTooltip(null);
+                                }}
+                                fill={hasTraffic ? "#3b82f6" : "#2d3748"}
+                                stroke={hasTraffic ? "#60a5fa" : "#1e293b"}
+                                strokeWidth={hasTraffic ? 1 : 0.5}
+                                style={{
+                                  default: { outline: "none" },
+                                  hover: { fill: "#60a5fa", outline: "none" },
+                                  pressed: { fill: "#2563eb", outline: "none" },
+                                }}
+                              />
+                            );
+                          })
+                        }
+                      </Geographies>
+                    </ZoomableGroup>
+                  </ComposableMap>
+                  {mapTooltip && (
+                    <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-[#0f172a]/90 text-white px-3 py-1.5 rounded-full text-xs font-bold border border-[#334155] shadow-xl pointer-events-none backdrop-blur-sm">
+                       {mapTooltip}
+                    </div>
+                  )}
+                </div>
+                <div className="mt-4 flex flex-wrap gap-4">
+                   {Array.from(countryStats.entries()).sort((a,b) => b[1] - a[1]).slice(0, 5).map(([code, count]) => (
+                      <div key={code} className="flex items-center gap-2 bg-[#0f172a] px-3 py-1.5 rounded-lg border border-[#334155]">
+                         <span className="text-white font-bold text-xs">{code}</span>
+                         <span className="text-slate-500 text-xs">{count} sessions</span>
+                      </div>
+                   ))}
+                </div>
+              </div>
+
+              {/* Traffic Heatmap */}
+              <div className="bg-[#1e293b] p-6 rounded-2xl border border-[#334155]">
+                <h3 className="text-lg font-bold text-white mb-6">Traffic Peak Hours</h3>
+                <div className="flex">
+                  <div className="flex flex-col justify-between text-[9px] text-slate-500 pr-2 pb-6">
+                     {['12am', '4am', '8am', '12pm', '4pm', '8pm'].map(h => <span key={h}>{h}</span>)}
+                  </div>
+                  <div className="flex-1">
+                    <div className="grid grid-cols-7 gap-2 mb-2">
+                      {['Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7', 'CN'].map(d => (
+                        <span key={d} className="text-[9px] font-bold text-slate-500 text-center">{d}</span>
+                      ))}
+                    </div>
+                    <div className="grid grid-cols-7 gap-2 h-[300px]">
+                      {Array.from({ length: 7 }).map((_, dIdx) => (
+                         <div key={dIdx} className="flex flex-col justify-between gap-1">
+                            {Array.from({ length: 24 }).map((_, hIdx) => {
+                               const count = heatmapData[dIdx][hIdx];
+                               const maxCount = Math.max(...heatmapData.flat(), 1);
+                               const opacity = count > 0 ? 0.3 + (count / maxCount) * 0.7 : 0.05;
+                               const size = count > 0 ? 6 + (count / maxCount) * 8 : 4;
+                               
+                               return (
+                                  <div 
+                                    key={hIdx} 
+                                    className="flex items-center justify-center h-full"
+                                    title={`${count} sessions at ${hIdx}:00`}
+                                  >
+                                     <div 
+                                        className={`rounded-full transition-all duration-500 ${count > 0 ? 'bg-blue-500' : 'bg-slate-700'}`}
+                                        style={{ 
+                                          width: `${size}px`, 
+                                          height: `${size}px`,
+                                          opacity
+                                        }}
+                                     ></div>
+                                  </div>
+                               );
+                            })}
+                         </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Main Chart */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
               <div className="lg:col-span-2 bg-[#1e293b] p-6 rounded-2xl border border-[#334155]">
                 <h3 className="text-lg font-bold text-white mb-6">Activity (Last 10 Sessions)</h3>
                 <div className="h-64">
