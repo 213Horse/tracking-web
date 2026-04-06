@@ -1146,8 +1146,8 @@ const App = () => {
                             <span className="text-white font-medium text-sm">
                               {session.visitor.identityMapping?.user?.name || session.visitor.identityMapping?.user?.email || 'Anonymous'}
                             </span>
-                            <span className="text-slate-500 text-[10px] uppercase tracking-tighter">
-                              {session.visitor.identityMapping?.user?.erpId ? `MÃ KH: ${session.visitor.identityMapping.user.erpId}` : `ID: ${session.visitorId.slice(0, 8)}...`}
+                            <span className="text-slate-500 text-[10px] uppercase tracking-tighter break-all whitespace-normal">
+                              {session.visitor.identityMapping?.user?.erpId ? `MÃ KH: ${session.visitor.identityMapping.user.erpId}` : `ID: ${session.visitorId}`}
                             </span>
                           </div>
                         </td>
@@ -1163,8 +1163,8 @@ const App = () => {
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <div className="flex flex-col max-w-[150px]">
-                            <span className="text-white text-[10px] truncate">{session.userAgent?.split(')')[0].replace('Mozilla/5.0 (', '')}</span>
+                          <div className="flex flex-col">
+                            <span className="text-white text-[10px] break-words whitespace-normal">{session.userAgent?.split(')')[0].replace('Mozilla/5.0 (', '')}</span>
                             <span className="text-slate-500 text-[10px]">{session.device || 'N/A'}</span>
                           </div>
                         </td>
