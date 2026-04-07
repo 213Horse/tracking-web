@@ -16,15 +16,19 @@ Tài liệu cho **bên thứ ba** dựng trang báo cáo trong hệ thống ERP,
 
 ---
 
-## 2. Ba API dashboard dùng trực tiếp
+## 2. API dashboard dùng trực tiếp
 
 | # | Method | Path | Dùng cho phần UI |
 |---|--------|------|------------------|
-| 1 | `GET` | `/api/v1/analytics/sessions` | KPI tổng quan, heatmap, bản đồ, commerce, danh sách phiên, users, raw events, biểu đồ theo phiên. |
-| 2 | `GET` | `/api/v1/analytics/dimension-stats` | **Bảng + biểu đồ “Phân tích chi tiết bộ lọc”** (Khách, Lượt xem, Phiên, Thoát, Thời gian TB) — **đã tổng hợp sẵn trên server**. |
-| 3 | `GET` | `/api/v1/active-users` | Chỉ số “đang hoạt động” (~phiên có hoạt động trong 60s). |
+| 1 | `GET` | `/api/v1/analytics/sessions` | KPI tự tính, bản đồ, danh sách phiên, users, raw events, biểu đồ theo phiên (hỗ trợ `limit` hoặc phân trang `pageNumber`/`pageSize`). |
+| 2 | `GET` | `/api/v1/analytics/dimension-stats` | **Phân tích chi tiết bộ lọc** — tổng hợp sẵn; có thể phân trang dòng `rows` (`rowsPageNumber` / `rowsPageSize`). |
+| 3 | `GET` | `/api/v1/active-users` | **Đang truy cập** (`count`) + tùy chọn **KPI tổng hợp** (`dashboardKpis`). |
+| 4 | `GET` | `/api/v1/analytics/traffic-peak-hours` | **Traffic Peak Hours** — ma trận 7×24 sẵn (GMT+7), không cần tải full sessions. |
+| 5 | `GET` | `/api/v1/analytics/commerce` | **Thương mại:** preview giỏ + đơn thành công (2 danh sách phân trang) + 2 bảng xếp hạng SP. |
 
-**Gợi ý polling (giống dashboard mẫu):** mỗi **10 giây** gọi lại cả ba (hoặc tách tần suất tùy tải). Đổi tab / ô tìm kiếm trong “Phân tích chi tiết” → gọi lại `dimension-stats` với `dimension` / `search` mới (có thể debounce ô search ~400ms).
+**Tóm tắt gọi API + hiển thị cho đối tác:** **[HUONG_DAN_GOI_API_CHO_DOI_TAC.md](./HUONG_DAN_GOI_API_CHO_DOI_TAC.md)**.
+
+**Gợi ý polling (giống dashboard mẫu):** mỗi **10 giây** gọi lại các API cần realtime (vd. `sessions` + `active-users`, hoặc tách tần suất). Đổi tab / ô tìm trong “Phân tích chi tiết” → gọi lại `dimension-stats` (debounce search ~400ms).
 
 ---
 
@@ -49,7 +53,7 @@ Bảng dưới mô tả **từng khối UI** tương đương dashboard. Đọc 
 | **E** | **Khối — Đơn hàng thành công** | **§4.4:** ghi bằng `POST /track` (`checkout_success`), đọc bằng **`GET /analytics/sessions`**. Lọc `name === 'checkout_success'`. Bảng: thời điểm, nhãn khách (như C), **`properties.orderNo`**. Sắp mới → cũ; ~25 dòng. Badge: tổng **số sự kiện** success (số “đơn” theo event). | Tiêu đề *Đơn hàng thành công*; cột mã đơn nổi bật (mono). Empty state nếu chưa có `checkout_success`. |
 | **F** | **Báo cáo: Sản phẩm mua nhiều** | **§4.4** — gom `productNames` từ event `checkout_success` (nếu có). Giống D nhưng nguồn là `checkout_success` và `productNames` (nếu response checkout có gửi). | Top xếp hạng + count; ghi chú nếu đơn cũ chỉ có `orderNo` không có tên SP. |
 | **G** | **Geographical Distribution** (bản đồ thế giới) | `GET /analytics/sessions`. Với mỗi phiên: parse `location` (JSON) → lấy mã **`country`** (ISO-2, vd. `VN`). Cộng dồn **số phiên** theo từng mã. Vẽ **choropleth** (map): quốc gia có traffic tô màu khác; hover tooltip dạng *`{Tên quốc gia}: {N} sessions`*. Dashboard dùng world-atlas + map mã quốc gia ↔ id geography (ERP có thể thay bằng bảng hoặc map đơn giản). **Dưới map:** hàng **tối đa 5 chip** — các quốc gia có nhiều phiên nhất (mã + `N sessions`), sort giảm. | Badge phụ có thể ghi *Global Coverage*. Ý nghĩa: **phiên bắt đầu từ quốc gia nào** (theo geo IP/session), trong cửa sổ thời gian. |
-| **H** | **Traffic Peak Hours** (heatmap giờ cao điểm) | `GET /analytics/sessions`. Ma trận **7 cột × 24 hàng** (hoặc 7 cột giờ 0–23 như dashboard: mỗi **cột** = một **thứ** trong tuần). Với **mỗi phiên**, lấy `startedAt`, chuyển sang timezone **`Asia/Ho_Chi_Minh`**: xác định **thứ** (Thứ 2 = 0 … Chủ nhật = 6; CN trong JS `getDay()===0` map sang cột 6) và **giờ 0–23**. Tăng `matrix[thứ][giờ] += 1`. **Mỗi ô = số phiên *bắt đầu* trong giờ đó** (không phải pageview, không phải tổng traffic tích lũy). Hiển thị: nhãn cột *Thứ 2 … CN*; trục phụ trái có thể ghi mốc *12am, 4am, 8am, 12pm, 4pm, 8pm*; từng ô là **chấm tròn** — **kích thước** và **độ đậm** tỉ lệ với count (so với max toàn ma trận); ô 0 vẫn hiện chấm mờ. **Tooltip ô:** *`{count} sessions at {giờ}:00`*. | Tiêu đề đúng như dashboard: *Traffic Peak Hours*. Giúp trả lời: **khách thường mở phiên vào ngày/giờ nào (giờ VN)** để canh chiến dịch / vận hành. |
+| **H** | **Traffic Peak Hours** (heatmap giờ cao điểm) | **Khuyến nghị:** `GET /api/v1/analytics/traffic-peak-hours?since=…&limit=…` — response có sẵn `matrix[7][24]`, `dayLabels`, `maxCount`, `timeZone` (xem **[HUONG_DAN_GOI_API_CHO_DOI_TAC.md](./HUONG_DAN_GOI_API_CHO_DOI_TAC.md)**). **Hoặc** tự tính từ `GET /analytics/sessions`: với **mỗi phiên**, lấy `startedAt`, chuyển sang **`Asia/Ho_Chi_Minh`**: **thứ** (Thứ 2 = 0 … Chủ nhật = 6) và **giờ 0–23**; `matrix[thứ][giờ] += 1`. **Mỗi ô = số phiên *bắt đầu* trong giờ đó**. Hiển thị: nhãn *Thứ 2 … CN*; trục giờ 0–23; **chấm tròn** — kích thước/độ đậm tỉ lệ với count (so với max). **Tooltip:** *`{count} sessions at {giờ}:00`*. | *Traffic Peak Hours* — **giờ VN**, phiên bắt đầu theo khung giờ để canh chiến dịch. |
 | **I** | **Activity (Last 10 Sessions)** (biểu đồ đường) | `GET /analytics/sessions`, mảng đã sort `startedAt` **giảm dần**. Lấy **10 phần tử đầu**. Mỗi điểm: trục X = nhãn thời gian từ `startedAt` (vd. giờ:phút:giây **GMT+7**), trục Y = **`events.length`** (số event trong phiên, **bao gồm** mọi `name`). Vẽ **line chart** một đường (`events`), có dot từng điểm; tooltip hiện giá trị. Có thể **đảo thứ tự** điểm để trục X tăng dần theo thời gian. | Tiêu đề giữ *Activity (Last 10 Sessions)*. Ý nghĩa: **mười phiên gần nhất** có “nhiều sự kiện” hay ít — phiên dày thường tương tác sâu hơn. |
 | **J** | **Device Distribution** (thanh % theo phiên) | **Lưu ý:** nhãn là *Device* nhưng dashboard hiện tại gom theo **trình duyệt** từ `userAgent`: Chrome / Safari / Firefox / Edge / Other (regex giống code TrackFlow). Với mỗi **phiên** gán một nhóm; **% = số phiên nhóm đó / tổng số phiên** × 100. Mỗi dòng: tên nhóm + **thanh progress ngang** + **%** đậm. Không có phiên → empty state. | ERP có thể đổi nhãn thành *Browser distribution* cho đúng dữ liệu, hoặc bổ sung thật phân bố mobile/desktop từ `device` nếu muốn khác dashboard. |
 | **K** | **Phân tích chi tiết bộ lọc** | `GET /analytics/dimension-stats` (+ `since` / `limit` / `search` / `dimension`). Không tự gom trên client. Debounce ô tìm ~400ms. | **Tabs** 11 dimension (Quốc gia, Thành phố, …). **Trái:** top ~10 dòng — 2 thanh ngang **Khách** (cam) vs **Lượt xem** (teal), scale theo max trong 10 dòng. **Phải:** bảng đầy đủ cột dimension \| Khách \| Lượt xem \| Phiên \| Thoát \| Thời gian TB. Trạng thái loading khi chờ API. |

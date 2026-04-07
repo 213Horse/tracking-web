@@ -15,6 +15,12 @@ import {
   parseRankEventsLimit,
   tallyProductNamesFromPropertiesRows,
 } from './commerce-analytics';
+import {
+  TRAFFIC_PEAK_TIMEZONE,
+  buildTrafficPeakMatrix,
+  matrixMaxCount,
+  trafficPeakDayLabelsVi,
+} from './traffic-peak-hours';
 import { buildOpenApiDocument } from './openapi-spec';
 
 dotenv.config();
@@ -567,6 +573,43 @@ app.get('/api/v1/analytics/commerce', apiKeyMiddleware, async (req: Request, res
         rankPreviewEventsScanned: rankPreviewRows.length,
         rankSuccessEventsScanned: rankSuccessRows.length,
       },
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * Ma trận Traffic Peak Hours (7 ngày × 24 giờ, GMT+7) — đếm phiên theo startedAt.
+ */
+app.get('/api/v1/analytics/traffic-peak-hours', apiKeyMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { since, limit } = parseAnalyticsSinceLimit(req);
+
+    const sessions = await prisma.session.findMany({
+      where: { startedAt: { gte: since } },
+      select: { startedAt: true },
+      orderBy: { startedAt: 'desc' },
+      take: limit,
+    });
+
+    const startedAts = sessions.map((s) => s.startedAt);
+    const matrix = buildTrafficPeakMatrix(startedAts);
+    const maxCount = matrixMaxCount(matrix);
+
+    res.setHeader('X-Analytics-Since', since.toISOString());
+    res.setHeader('X-Analytics-Limit', String(limit));
+
+    res.json({
+      timeZone: TRAFFIC_PEAK_TIMEZONE,
+      dayLabels: trafficPeakDayLabelsVi(),
+      matrix,
+      maxCount,
+      since: since.toISOString(),
+      sessionsScanned: sessions.length,
+      sessionLimit: limit,
+      note:
+        'Mỗi phiên cộng 1 vào ô (hàng = Thứ 2..CN, cột = giờ 0–23) theo startedAt tại timeZone. Chỉ gồm tối đa sessionLimit phiên mới nhất trong cửa sổ since.',
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

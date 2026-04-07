@@ -220,6 +220,37 @@ export function buildOpenApiDocument(baseUrl: string): Record<string, unknown> {
           },
         },
       },
+      '/api/v1/analytics/traffic-peak-hours': {
+        get: {
+          tags: ['Analytics'],
+          summary: 'Traffic Peak Hours — ma trận 7×24 (phiên / giờ, GMT+7) theo startedAt',
+          parameters: [
+            {
+              name: 'since',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Phiên có startedAt >= since (mặc định N ngày gần đây).',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description: 'Tối đa số phiên lấy vào ma trận (mới nhất trước), cap ANALYTICS_MAX_LIMIT.',
+            },
+          ],
+          responses: {
+            '200': {
+              description:
+                '{ timeZone, dayLabels, matrix[7][24], maxCount, since, sessionsScanned, sessionLimit, note }',
+              headers: {
+                'X-Analytics-Since': { schema: { type: 'string' } },
+                'X-Analytics-Limit': { schema: { type: 'string' } },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
       '/api/v1/analytics/dimension-stats': {
         get: {
           tags: ['Analytics'],
