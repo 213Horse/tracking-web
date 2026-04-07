@@ -129,7 +129,8 @@ export function buildOpenApiDocument(baseUrl: string): Record<string, unknown> {
       '/api/v1/analytics/sessions': {
         get: {
           tags: ['Analytics'],
-          summary: 'Danh sách phiên + events (có giới hạn thời gian và số lượng)',
+          summary:
+            'Danh sách phiên + events — legacy `limit` hoặc phân trang `pageNumber` + `pageSize`',
           parameters: [
             {
               name: 'since',
@@ -141,16 +142,78 @@ export function buildOpenApiDocument(baseUrl: string): Record<string, unknown> {
               name: 'limit',
               in: 'query',
               schema: { type: 'integer', minimum: 1 },
-              description: 'Số phiên tối đa (bị giới hạn bởi ANALYTICS_MAX_LIMIT).',
+              description:
+                'Chế độ legacy (không dùng pageNumber/pageSize): số phiên tối đa, trả về mảng JSON. Bị cap bởi ANALYTICS_MAX_LIMIT.',
+            },
+            {
+              name: 'pageNumber',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description:
+                'Phân trang: trang bắt đầu từ 1. Nếu có pageNumber hoặc pageSize → response là object { items, meta }, không phải mảng.',
+            },
+            {
+              name: 'pageSize',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description:
+                'Số phiên mỗi trang (mặc định 50 nếu chỉ gửi pageNumber). Tối đa ANALYTICS_MAX_LIMIT.',
             },
           ],
           responses: {
             '200': {
-              description: 'Mảng Session (kèm events, visitor…)',
+              description:
+                'Không phân trang: mảng Session[]. Có pageNumber/pageSize: { items: Session[], meta: { total, pageNumber, pageSize, totalPages, since, eventsCapPerSession } }',
               headers: {
                 'X-Analytics-Since': { schema: { type: 'string' } },
-                'X-Analytics-Limit': { schema: { type: 'string' } },
                 'X-Analytics-Events-Cap': { schema: { type: 'string' } },
+                'X-Analytics-Limit': {
+                  schema: { type: 'string' },
+                  description: 'Chỉ khi chế độ legacy (limit)',
+                },
+                'X-Analytics-Total': {
+                  schema: { type: 'string' },
+                  description: 'Chỉ khi phân trang',
+                },
+                'X-Analytics-Page': { schema: { type: 'string' } },
+                'X-Analytics-Page-Size': { schema: { type: 'string' } },
+                'X-Analytics-Page-Count': { schema: { type: 'string' } },
+              },
+            },
+            '401': { description: 'Unauthorized' },
+          },
+        },
+      },
+      '/api/v1/analytics/commerce': {
+        get: {
+          tags: ['Analytics'],
+          summary:
+            'Thương mại: checkout_preview + checkout_success (2 danh sách phân trang độc lập) + xếp hạng sản phẩm',
+          parameters: [
+            {
+              name: 'since',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Lọc theo session.startedAt >= since (giống analytics khác).',
+            },
+            { name: 'previewPageNumber', in: 'query', schema: { type: 'integer', minimum: 1 }, description: 'Trang preview giỏ, mặc định 1' },
+            { name: 'previewPageSize', in: 'query', schema: { type: 'integer', minimum: 1 }, description: 'Mặc định 25, tối đa 500' },
+            { name: 'successPageNumber', in: 'query', schema: { type: 'integer', minimum: 1 }, description: 'Trang đơn thành công, mặc định 1' },
+            { name: 'successPageSize', in: 'query', schema: { type: 'integer', minimum: 1 }, description: 'Mặc định 25, tối đa 500' },
+            {
+              name: 'rankEventsLimit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description:
+                'Số event mới nhất dùng tính productWantRank / productPurchasedRank (mặc định 25000, tối đa 100000)',
+            },
+          ],
+          responses: {
+            '200': {
+              description:
+                '{ checkoutPreview, checkoutSuccess, productWantRank, productPurchasedRank, meta } — mỗi block list có items + total + pageNumber + pageSize + totalPages',
+              headers: {
+                'X-Analytics-Since': { schema: { type: 'string' } },
               },
             },
             '401': { description: 'Unauthorized' },
@@ -189,15 +252,32 @@ export function buildOpenApiDocument(baseUrl: string): Record<string, unknown> {
             { name: 'since', in: 'query', schema: { type: 'string', format: 'date-time' } },
             { name: 'limit', in: 'query', schema: { type: 'integer', minimum: 1 } },
             { name: 'search', in: 'query', schema: { type: 'string' }, description: 'Lọc theo chuỗi con (không phân biệt hoa thường)' },
+            {
+              name: 'rowsPageNumber',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description:
+                'Phân trang mảng `rows` sau khi tổng hợp (giảm payload HTTP). DB vẫn đọc tối đa `limit` phiên. Kết hợp rowsPageSize.',
+            },
+            {
+              name: 'rowsPageSize',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description: 'Số dòng dimension mỗi trang (mặc định 50 nếu chỉ gửi rowsPageNumber).',
+            },
           ],
           responses: {
             '200': {
               description:
-                '{ rows: DimensionStatRow[], meta: { dimension, since, sessionLimit, eventsCapPerSession, computedAt, fromCache } }',
+                '{ rows, meta } — meta có thể gồm rowsTotal, rowsPageNumber, rowsPageSize, rowsTotalPages khi phân trang. Cache lưu full rows; mỗi trang chỉ trả slice.',
               headers: {
                 'X-Analytics-Since': { schema: { type: 'string' } },
                 'X-Analytics-Limit': { schema: { type: 'string' } },
                 'X-Analytics-Events-Cap': { schema: { type: 'string' } },
+                'X-Analytics-Rows-Total': { schema: { type: 'string' } },
+                'X-Analytics-Rows-Page': { schema: { type: 'string' } },
+                'X-Analytics-Rows-Page-Size': { schema: { type: 'string' } },
+                'X-Analytics-Rows-Page-Count': { schema: { type: 'string' } },
               },
             },
             '400': { description: 'Thiếu/sai dimension' },
@@ -208,15 +288,90 @@ export function buildOpenApiDocument(baseUrl: string): Record<string, unknown> {
       '/api/v1/active-users': {
         get: {
           tags: ['Analytics'],
-          summary: 'Số phiên hoạt động trong ~1 phút gần nhất',
+          summary:
+            'Đang truy cập (~60s) + KPI dashboard (lượt xem, khách, phiên, thời gian TB, bounce, trend %) trong cửa sổ since/limit',
+          parameters: [
+            {
+              name: 'since',
+              in: 'query',
+              schema: { type: 'string', format: 'date-time' },
+              description: 'Giống GET /analytics/sessions — mặc định N ngày gần đây',
+            },
+            {
+              name: 'limit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description: 'Trần số phiên (cap server); KPI thực tế quét tối đa min(limit, kpiSessionLimit, ACTIVE_USERS_KPI_MAX_SESSIONS)',
+            },
+            {
+              name: 'kpiSessionLimit',
+              in: 'query',
+              schema: { type: 'integer', minimum: 1 },
+              description:
+                'Tuỳ chọn: giới hạn nhỏ hơn số phiên dùng tính dashboardKpis (giảm tải server). Nếu < sessionsInWindow thì kpiApproximate=true.',
+            },
+          ],
           responses: {
             '200': {
-              description: 'OK',
+              description:
+                'count = phiên hoạt động gần đây; dashboardKpis tính trên tối đa kpiSessionsScanned phiên mới nhất trong cửa sổ since',
+              headers: {
+                'X-Analytics-Since': { schema: { type: 'string' } },
+                'X-Analytics-Limit': { schema: { type: 'string' } },
+                'X-Analytics-Events-Cap': { schema: { type: 'string' } },
+                'X-Analytics-Kpi-Sessions-Scanned': { schema: { type: 'string' } },
+              },
               content: {
                 'application/json': {
                   schema: {
                     type: 'object',
-                    properties: { count: { type: 'integer' } },
+                    required: [
+                      'count',
+                      'since',
+                      'sessionLimit',
+                      'kpiSessionsScanned',
+                      'sessionsInWindow',
+                      'kpiApproximate',
+                      'eventsCapPerSession',
+                      'dashboardKpis',
+                    ],
+                    properties: {
+                      count: { type: 'integer', description: 'Phiên có hoạt động trong ~60s, endedAt null' },
+                      since: { type: 'string', format: 'date-time' },
+                      sessionLimit: { type: 'integer' },
+                      kpiSessionsScanned: { type: 'integer' },
+                      sessionsInWindow: {
+                        type: 'integer',
+                        description: 'Tổng phiên có startedAt >= since (ước lượng cỡ cửa sổ)',
+                      },
+                      kpiApproximate: {
+                        type: 'boolean',
+                        description: 'true nếu KPI chỉ dựa trên kpiSessionsScanned phiên đầu, chưa hết cửa sổ',
+                      },
+                      eventsCapPerSession: { type: 'integer' },
+                      dashboardKpis: {
+                        type: 'object',
+                        properties: {
+                          pageviewsCount: { type: 'integer' },
+                          uniqueVisitorsCount: { type: 'integer' },
+                          sessionsCount: { type: 'integer' },
+                          avgDurationSec: { type: 'number' },
+                          avgDurationFormatted: { type: 'string', example: '12m 34s' },
+                          bounces: { type: 'integer' },
+                          bounceRatePct: { type: 'number' },
+                          trendsPct: {
+                            type: 'object',
+                            properties: {
+                              pageviews: { type: 'number' },
+                              uniqueVisitors: { type: 'number' },
+                              sessions: { type: 'number' },
+                              avgDurationSec: { type: 'number' },
+                              bounceRate: { type: 'number' },
+                            },
+                          },
+                        },
+                      },
+                    },
                   },
                 },
               },

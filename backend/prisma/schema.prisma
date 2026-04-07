@@ -41,6 +41,8 @@ model Event {
 
   @@index([sessionId])
   @@index([timestamp])
+  @@index([name])
+  @@index([name, timestamp])
 }
 
 model User {
