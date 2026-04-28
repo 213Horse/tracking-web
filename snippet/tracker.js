@@ -92,6 +92,35 @@
     if (n == null || n === '') return null;
     return String(n);
   };
+  const customerGroupNameFromPayload = (payload) => {
+    if (!payload || typeof payload !== 'object') return undefined;
+    if (typeof payload.customerGroupName === 'string' && payload.customerGroupName.trim()) return payload.customerGroupName;
+    if (typeof payload.customer_group_name === 'string' && payload.customer_group_name.trim()) return payload.customer_group_name;
+    if (payload.customerGroup && typeof payload.customerGroup === 'object') {
+      if (typeof payload.customerGroup.name === 'string' && payload.customerGroup.name.trim()) return payload.customerGroup.name;
+      if (typeof payload.customerGroup.groupName === 'string' && payload.customerGroup.groupName.trim()) return payload.customerGroup.groupName;
+    }
+    if (payload.customer_group && typeof payload.customer_group === 'object') {
+      if (typeof payload.customer_group.name === 'string' && payload.customer_group.name.trim()) return payload.customer_group.name;
+      if (typeof payload.customer_group.group_name === 'string' && payload.customer_group.group_name.trim()) return payload.customer_group.group_name;
+    }
+    return undefined;
+  };
+  const identifyTraitsFromErpPayload = (erpData) => {
+    if (!erpData || typeof erpData !== 'object' || !erpData.erpId) return null;
+    var fullName = erpData.name || ((erpData.firstname || '') + ' ' + (erpData.lastname || '')).trim() || undefined;
+    var phoneNumber = erpData.phoneNumber || erpData.phone || erpData.mobile || erpData.phone_number;
+    var customerGroupName = customerGroupNameFromPayload(erpData);
+    return {
+      email: erpData.email,
+      firstname: erpData.firstname,
+      lastname: erpData.lastname,
+      name: fullName,
+      erpId: erpData.erpId,
+      phoneNumber: phoneNumber ? String(phoneNumber) : undefined,
+      customerGroupName: customerGroupName
+    };
+  };
   const handleBookmediCommerceResponse = (url, ok, data) => {
     if (!isInitialized || !ok || !isBookmediApiUrl(url)) return;
     if (url.indexOf('preview-orders') !== -1 && isThanhToanPage()) {
@@ -217,15 +246,8 @@
           clone.json().then(data => {
             // Check if the response actually contains user identifying info
             const erpData = data?.data || data; // Handle { data: { erpId } } wrappers just in case
-            if (erpData && erpData.erpId) {
-              tracker.identify(erpData.erpId, {
-                email: erpData.email,
-                firstname: erpData.firstname,
-                lastname: erpData.lastname,
-                name: erpData.name || ((erpData.firstname || '') + ' ' + (erpData.lastname || '')).trim() || undefined,
-                erpId: erpData.erpId
-              });
-            }
+            var identifyTraits = identifyTraitsFromErpPayload(erpData);
+            if (identifyTraits) tracker.identify(erpData.erpId, identifyTraits);
             handleBookmediCommerceResponse(url, response.ok, data);
           }).catch(() => {});
         }
@@ -244,15 +266,8 @@
           try {
             const rawData = JSON.parse(this.responseText);
             const erpData = rawData?.data || rawData;
-            if (erpData && erpData.erpId) {
-              tracker.identify(erpData.erpId, {
-                email: erpData.email,
-                firstname: erpData.firstname,
-                lastname: erpData.lastname,
-                name: erpData.name || ((erpData.firstname || '') + ' ' + (erpData.lastname || '')).trim() || undefined,
-                erpId: erpData.erpId
-              });
-            }
+            var identifyTraits2 = identifyTraitsFromErpPayload(erpData);
+            if (identifyTraits2) tracker.identify(erpData.erpId, identifyTraits2);
             var xhrUrl = this._bm_track_url || '';
             var ok = this.status >= 200 && this.status < 300;
             handleBookmediCommerceResponse(xhrUrl, ok, rawData);

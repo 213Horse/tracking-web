@@ -1,6 +1,10 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Prisma, PrismaClient } from '@prisma/client';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -27,12 +31,15 @@ dotenv.config();
 
 const app = express();
 const prisma = new PrismaClient();
+const execFileAsync = promisify(execFile);
 
 const PORT = process.env.PORT || 3001;
 /** Khóa cố định: đặt TRACKING_API_KEY trong .env (production bắt buộc đổi khỏi default). */
 const API_KEY = process.env.TRACKING_API_KEY || 'default_secret_key';
 const IS_PROD = process.env.NODE_ENV === 'production';
 const API_PUBLIC_BASE = (process.env.API_PUBLIC_URL || `http://127.0.0.1:${PORT}`).replace(/\/$/, '');
+const DB_BACKUP_MAX_SIZE_MB = Math.max(1, parseInt(process.env.DB_BACKUP_MAX_SIZE_MB || '100', 10) || 100);
+const DB_BACKUP_MAX_SIZE_BYTES = DB_BACKUP_MAX_SIZE_MB * 1024 * 1024;
 
 /** Mặc định chỉ tải phiên trong N ngày gần đây (tránh OOM). */
 const ANALYTICS_DEFAULT_DAYS = Math.min(
@@ -52,6 +59,10 @@ const ANALYTICS_DIMENSION_CACHE_TTL_SEC = Math.max(
   0,
   parseInt(process.env.ANALYTICS_DIMENSION_CACHE_TTL_SEC || '90', 10) || 0
 );
+const isMissingAnalyticsDimensionCacheTable = (error: unknown): boolean => {
+  const msg = error instanceof Error ? error.message : String(error || '');
+  return msg.includes('AnalyticsDimensionCache') && msg.includes('does not exist');
+};
 
 /** Tối đa số dòng dimension trả về mỗi request khi dùng rowsPageSize (tránh payload quá lớn). */
 const DIMENSION_ROWS_PAGE_MAX = Math.min(5000, ANALYTICS_MAX_LIMIT);
@@ -254,6 +265,82 @@ const apiKeyMiddleware = (req: Request, res: Response, next: NextFunction) => {
   }
   next();
 };
+
+function resolveDatabaseUrl(): string {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl || !databaseUrl.trim()) {
+    throw new Error('DATABASE_URL is missing.');
+  }
+  return databaseUrl;
+}
+
+function buildBackupFileName(): string {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mi = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  return `tracking-backup-${yyyy}${mm}${dd}-${hh}${mi}${ss}.sql`;
+}
+
+app.get('/api/v1/db/backup', apiKeyMiddleware, async (_req, res) => {
+  try {
+    const databaseUrl = resolveDatabaseUrl();
+    const backupFileName = buildBackupFileName();
+    const args = ['--dbname', databaseUrl, '--clean', '--if-exists', '--no-owner', '--no-privileges'];
+    const { stdout } = await execFileAsync('pg_dump', args, {
+      env: { ...process.env, PGPASSWORD: '' },
+      maxBuffer: Math.max(DB_BACKUP_MAX_SIZE_BYTES, 5 * 1024 * 1024),
+    });
+
+    res.setHeader('Content-Type', 'application/sql; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${backupFileName}"`);
+    res.status(200).send(stdout);
+  } catch (error: any) {
+    const message = error?.stderr || error?.message || 'Failed to create DB backup';
+    res.status(500).json({ error: String(message).trim() });
+  }
+});
+
+app.post('/api/v1/db/backup/restore', apiKeyMiddleware, express.text({ type: '*/*', limit: `${DB_BACKUP_MAX_SIZE_MB}mb` }), async (req, res) => {
+  const sql = typeof req.body === 'string' ? req.body : '';
+  if (!sql.trim()) {
+    return res.status(400).json({ error: 'Backup content is empty' });
+  }
+
+  const tempFilePath = path.join(tmpdir(), `tracking-restore-${Date.now()}.sql`);
+  try {
+    const databaseUrl = resolveDatabaseUrl();
+    await prisma.$disconnect();
+    await fs.writeFile(tempFilePath, sql, 'utf8');
+    await execFileAsync(
+      'psql',
+      ['--dbname', databaseUrl, '--set', 'ON_ERROR_STOP=1', '--file', tempFilePath],
+      {
+        env: { ...process.env, PGPASSWORD: '' },
+        maxBuffer: Math.max(DB_BACKUP_MAX_SIZE_BYTES, 5 * 1024 * 1024),
+      }
+    );
+    await prisma.$connect();
+    return res.json({ success: true });
+  } catch (error: any) {
+    const message = error?.stderr || error?.message || 'Failed to restore DB backup';
+    return res.status(500).json({ error: String(message).trim() });
+  } finally {
+    try {
+      await fs.unlink(tempFilePath);
+    } catch {
+      /* ignore cleanup error */
+    }
+    try {
+      await prisma.$connect();
+    } catch {
+      /* ignore reconnect error */
+    }
+  }
+});
 
 function resolveLocationForNewSession(req: Request, context: any): string | undefined {
   const ipRaw = (req.headers['x-forwarded-for'] || req.ip || context?.ip) as string;
@@ -666,12 +753,16 @@ app.get('/api/v1/analytics/dimension-stats', apiKeyMiddleware, async (req: Reque
     };
 
     if (ANALYTICS_DIMENSION_CACHE_TTL_SEC > 0) {
-      const hit = await prisma.analyticsDimensionCache.findUnique({ where: { cacheKey } });
-      if (hit && Date.now() - hit.computedAt.getTime() < ANALYTICS_DIMENSION_CACHE_TTL_SEC * 1000) {
-        const payload = hit.payload as { rows?: unknown[]; meta?: Record<string, unknown> };
-        const fullRows = Array.isArray(payload.rows) ? payload.rows : [];
-        const baseMeta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : {};
-        return sendDimensionPayload(fullRows, baseMeta, true);
+      try {
+        const hit = await prisma.analyticsDimensionCache.findUnique({ where: { cacheKey } });
+        if (hit && Date.now() - hit.computedAt.getTime() < ANALYTICS_DIMENSION_CACHE_TTL_SEC * 1000) {
+          const payload = hit.payload as { rows?: unknown[]; meta?: Record<string, unknown> };
+          const fullRows = Array.isArray(payload.rows) ? payload.rows : [];
+          const baseMeta = payload.meta && typeof payload.meta === 'object' ? { ...payload.meta } : {};
+          return sendDimensionPayload(fullRows, baseMeta, true);
+        }
+      } catch (error) {
+        if (!isMissingAnalyticsDimensionCacheTable(error)) throw error;
       }
     }
 
@@ -711,12 +802,16 @@ app.get('/api/v1/analytics/dimension-stats', apiKeyMiddleware, async (req: Reque
     };
 
     if (ANALYTICS_DIMENSION_CACHE_TTL_SEC > 0) {
-      const payloadJson = JSON.parse(JSON.stringify(body)) as Prisma.InputJsonValue;
-      await prisma.analyticsDimensionCache.upsert({
-        where: { cacheKey },
-        create: { cacheKey, payload: payloadJson },
-        update: { payload: payloadJson, computedAt: new Date() },
-      });
+      try {
+        const payloadJson = JSON.parse(JSON.stringify(body)) as Prisma.InputJsonValue;
+        await prisma.analyticsDimensionCache.upsert({
+          where: { cacheKey },
+          create: { cacheKey, payload: payloadJson },
+          update: { payload: payloadJson, computedAt: new Date() },
+        });
+      } catch (error) {
+        if (!isMissingAnalyticsDimensionCacheTable(error)) throw error;
+      }
     }
 
     return sendDimensionPayload(body.rows, body.meta, false);

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, LineChart, Line } from 'recharts';
-import { Users, MousePointer2, Clock, Search, ArrowRight, LayoutDashboard, Database, Activity, MapPin, Eye, Copy, User, Globe, Monitor, Timer, ShoppingCart, Package, ListOrdered } from 'lucide-react';
+import { Users, MousePointer2, Clock, Search, ArrowRight, LayoutDashboard, Database, Activity, MapPin, Eye, Copy, User, Globe, Monitor, Timer, ShoppingCart, Package, ListOrdered, Download, Upload } from 'lucide-react';
 import { formatDistanceToNow, format } from 'date-fns';
 import { vi } from 'date-fns/locale';
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from "react-simple-maps";
@@ -73,9 +73,41 @@ interface Session {
         email: string;
         name?: string;
         erpId?: string;
+        traits?: Record<string, any>;
       }
     }
   }
+}
+
+interface TrafficPeakHoursResponse {
+  timeZone: string;
+  dayLabels: string[];
+  matrix: number[][];
+  maxCount: number;
+  since: string;
+  sessionsScanned: number;
+  sessionLimit: number;
+}
+
+interface CommerceListRow {
+  id: string;
+  visitorId: string;
+  customerLabel: string;
+  customerTitle: string;
+  at: string;
+}
+
+interface CommerceResponse {
+  checkoutPreview: {
+    items: Array<CommerceListRow & { products: string[] }>;
+    total: number;
+  };
+  checkoutSuccess: {
+    items: Array<CommerceListRow & { orderNo: string }>;
+    total: number;
+  };
+  productWantRank: Array<{ name: string; count: number }>;
+  productPurchasedRank: Array<{ name: string; count: number }>;
 }
 
 function commerceCustomerFromSession(s: Session): { label: string; title: string } {
@@ -138,6 +170,11 @@ const App = () => {
     }>
   >([]);
   const [dimensionStatsLoading, setDimensionStatsLoading] = useState(false);
+  const [trafficPeak, setTrafficPeak] = useState<TrafficPeakHoursResponse | null>(null);
+  const [commerceData, setCommerceData] = useState<CommerceResponse | null>(null);
+  const [backupActionLoading, setBackupActionLoading] = useState<'download' | 'restore' | null>(null);
+  const [backupActionMessage, setBackupActionMessage] = useState<string | null>(null);
+  const backupFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const activeAnalysisTabRef = useRef(activeAnalysisTab);
   const analysisSearchRef = useRef(analysisSearch);
@@ -227,6 +264,41 @@ const App = () => {
           });
         })
         .catch(err => console.error(err));
+
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/traffic-peak-hours?${qs}`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      })
+        .then((res) => res.json())
+        .then((data: TrafficPeakHoursResponse) => {
+          if (
+            data &&
+            Array.isArray(data.matrix) &&
+            data.matrix.length === 7 &&
+            data.matrix.every((row) => Array.isArray(row) && row.length === 24)
+          ) {
+            setTrafficPeak(data);
+          }
+        })
+        .catch((err) => console.error(err));
+
+      const commerceQs = new URLSearchParams({
+        since: since.toISOString(),
+        previewPageNumber: '1',
+        previewPageSize: '25',
+        successPageNumber: '1',
+        successPageSize: '25',
+        rankEventsLimit: '2000',
+      });
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/commerce?${commerceQs}`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      })
+        .then((res) => res.json())
+        .then((data: CommerceResponse) => {
+          if (data?.checkoutPreview?.items && data?.checkoutSuccess?.items) {
+            setCommerceData(data);
+          }
+        })
+        .catch((err) => console.error(err));
     };
 
     const fetchDimensionStats = () => {
@@ -330,8 +402,8 @@ const App = () => {
 
   const activeUsersTrend = prevActiveUsers === 0 ? (activeUsers > 0 ? 100 : 0) : ((activeUsers - prevActiveUsers) / prevActiveUsers) * 100;
 
-  // Heatmap Aggregation (7 days x 24 hours)
-  const heatmapData = Array.from({ length: 7 }, () => Array(24).fill(0));
+  // Heatmap Aggregation (7 days x 24 hours) - fallback local compute when API not available.
+  const fallbackHeatmapData = Array.from({ length: 7 }, () => Array(24).fill(0));
   const countryStats = new Map();
 
   sessions.forEach(s => {
@@ -346,7 +418,7 @@ const App = () => {
     dayIdx = dayIdx === 0 ? 6 : dayIdx - 1; 
     
     const hourIdx = vnTime.getHours();
-    heatmapData[dayIdx][hourIdx] += 1;
+    fallbackHeatmapData[dayIdx][hourIdx] += 1;
 
     // Geo aggregation
     if (s.location) {
@@ -358,6 +430,13 @@ const App = () => {
       } catch(e) {}
     }
   });
+
+  const heatmapData =
+    trafficPeak?.matrix &&
+    trafficPeak.matrix.length === 7 &&
+    trafficPeak.matrix.every((row) => Array.isArray(row) && row.length === 24)
+      ? trafficPeak.matrix
+      : fallbackHeatmapData;
 
   // Advanced Top Level Metrics
   const pageviewsCount = sessions.flatMap(s => s.events).filter(e => e.name === 'pageview').length;
@@ -425,7 +504,7 @@ const App = () => {
     events: s.events.length
   })).reverse();
 
-  const commercePreviewRows = sessions
+  const fallbackCommercePreviewRows = sessions
     .flatMap((s) =>
       s.events
         .filter((e) => e.name === 'checkout_preview')
@@ -444,7 +523,7 @@ const App = () => {
     .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
     .slice(0, 25);
 
-  const commerceOrderRows = sessions
+  const fallbackCommerceOrderRows = sessions
     .flatMap((s) =>
       s.events
         .filter((e) => e.name === 'checkout_success')
@@ -463,16 +542,25 @@ const App = () => {
     .sort((a, b) => new Date(b.at).getTime() - new Date(a.at).getTime())
     .slice(0, 25);
 
-  const checkoutPreviewVisitorCount = new Set(
+  const fallbackCheckoutPreviewVisitorCount = new Set(
     sessions.filter((s) => s.events.some((e) => e.name === 'checkout_preview')).map((s) => s.visitorId)
   ).size;
-  const checkoutSuccessCount = sessions.flatMap((s) => s.events).filter((e) => e.name === 'checkout_success').length;
+  const fallbackCheckoutSuccessCount = sessions.flatMap((s) => s.events).filter((e) => e.name === 'checkout_success').length;
 
   const previewEventsForReport = sessions.flatMap((s) => s.events.filter((e) => e.name === 'checkout_preview'));
-  const productWantRank = tallyProductNamesFromEvents(previewEventsForReport, 'productNames');
+  const fallbackProductWantRank = tallyProductNamesFromEvents(previewEventsForReport, 'productNames');
 
   const successEventsForReport = sessions.flatMap((s) => s.events.filter((e) => e.name === 'checkout_success'));
-  const productPurchasedRank = tallyProductNamesFromEvents(successEventsForReport, 'productNames');
+  const fallbackProductPurchasedRank = tallyProductNamesFromEvents(successEventsForReport, 'productNames');
+
+  const commercePreviewRows = commerceData?.checkoutPreview?.items ?? fallbackCommercePreviewRows;
+  const commerceOrderRows = commerceData?.checkoutSuccess?.items ?? fallbackCommerceOrderRows;
+  const checkoutPreviewVisitorCount = commerceData
+    ? new Set((commerceData.checkoutPreview.items || []).map((row) => row.visitorId)).size
+    : fallbackCheckoutPreviewVisitorCount;
+  const checkoutSuccessCount = commerceData?.checkoutSuccess?.total ?? fallbackCheckoutSuccessCount;
+  const productWantRank = commerceData?.productWantRank ?? fallbackProductWantRank;
+  const productPurchasedRank = commerceData?.productPurchasedRank ?? fallbackProductPurchasedRank;
 
   const allEvents = sessions.flatMap(s => s.events.map(e => ({ 
     ...e, 
@@ -540,11 +628,27 @@ const App = () => {
     const orderNos = [
       ...new Set(successOrderEvents.map((e) => e.properties?.orderNo).filter(Boolean) as string[]),
     ];
+    const userTraits = latest.visitor?.identityMapping?.user?.traits || {};
+    const phoneNumber = String(
+      userTraits.phoneNumber ??
+      userTraits.phone ??
+      userTraits.mobile ??
+      userTraits.phone_number ??
+      ''
+    ).trim();
+    const customerGroupName = String(
+      userTraits.customerGroupName ??
+      userTraits.customer_group_name ??
+      userTraits.groupName ??
+      ''
+    ).trim();
 
     return {
       email: latest.visitor?.identityMapping?.user?.email,
       name: latest.visitor?.identityMapping?.user?.name,
       erpId: latest.visitor?.identityMapping?.user?.erpId,
+      phoneNumber: phoneNumber || undefined,
+      customerGroupName: customerGroupName || undefined,
       vSessions, vEvents, visits: vSessions.length, views, events: vEvents.length - views, durationSec, firstSeen, lastSeen, geo, browser, os,
       device: latest.device?.includes('x') ? 'Desktop/Laptop' : 'Mobile',
       latestPreviewProducts,
@@ -553,6 +657,65 @@ const App = () => {
   };
 
   const vp = selectedVisitorId ? getVisitorProfile(selectedVisitorId) : null;
+
+  const downloadDbBackup = async () => {
+    try {
+      setBackupActionLoading('download');
+      setBackupActionMessage(null);
+      const res = await fetch(`${TRACKING_API_BASE}/api/v1/db/backup`, {
+        headers: { 'x-api-key': TRACKING_API_KEY },
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'Không tải được file backup');
+      }
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const cd = res.headers.get('content-disposition') || '';
+      const fileNameMatch = cd.match(/filename="?([^"]+)"?/i);
+      const fileName = fileNameMatch?.[1] || `tracking-backup-${Date.now()}.sql`;
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      setBackupActionMessage('Đã tải backup DB thành công.');
+    } catch (error: any) {
+      setBackupActionMessage(`Lỗi tải backup: ${error?.message || 'Không xác định'}`);
+    } finally {
+      setBackupActionLoading(null);
+    }
+  };
+
+  const restoreDbBackupFromFile = async (file: File) => {
+    try {
+      setBackupActionLoading('restore');
+      setBackupActionMessage(null);
+      const content = await file.text();
+      const res = await fetch(`${TRACKING_API_BASE}/api/v1/db/backup/restore`, {
+        method: 'POST',
+        headers: {
+          'x-api-key': TRACKING_API_KEY,
+          'Content-Type': 'text/plain; charset=utf-8',
+        },
+        body: content,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || 'Không restore được backup');
+      }
+      setBackupActionMessage(`Đã upload và restore backup: ${file.name}`);
+    } catch (error: any) {
+      setBackupActionMessage(`Lỗi restore backup: ${error?.message || 'Không xác định'}`);
+    } finally {
+      setBackupActionLoading(null);
+      if (backupFileInputRef.current) {
+        backupFileInputRef.current.value = '';
+      }
+    }
+  };
 
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-200 font-sans">
@@ -602,12 +765,48 @@ const App = () => {
             )}
           </div>
           <div className="flex gap-4">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={downloadDbBackup}
+                disabled={backupActionLoading !== null}
+                className="inline-flex items-center gap-1.5 bg-[#1e293b] border border-[#334155] rounded-lg px-3 py-2 text-xs text-slate-200 hover:border-blue-500 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                <Download size={14} />
+                {backupActionLoading === 'download' ? 'Đang tải...' : 'Tải backup DB'}
+              </button>
+              <button
+                type="button"
+                onClick={() => backupFileInputRef.current?.click()}
+                disabled={backupActionLoading !== null}
+                className="inline-flex items-center gap-1.5 bg-[#1e293b] border border-[#334155] rounded-lg px-3 py-2 text-xs text-slate-200 hover:border-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                <Upload size={14} />
+                {backupActionLoading === 'restore' ? 'Đang upload...' : 'Upload backup DB'}
+              </button>
+              <input
+                ref={backupFileInputRef}
+                type="file"
+                accept=".sql,text/plain"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  restoreDbBackupFromFile(file);
+                }}
+              />
+            </div>
             <div className="relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 w-4 h-4" />
               <input type="text" placeholder="Search..." className="bg-[#1e293b] border border-[#334155] rounded-lg pl-10 pr-4 py-2 outline-none focus:border-blue-500 transition-all text-sm w-64" />
             </div>
           </div>
         </header>
+        {backupActionMessage && (
+          <p className="mb-4 text-xs text-amber-200/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+            {backupActionMessage}
+          </p>
+        )}
 
         {activeTab === 'dashboard' && (
           <>
@@ -1378,6 +1577,20 @@ const App = () => {
                 <h3 className="text-2xl font-black text-slate-900 tracking-tight">{vp.name || vp.email || 'THÔNG TIN PHIÊN'}</h3>
                 {vp.email && <p className="text-slate-500 text-sm mb-4">{vp.email}</p>}
                 {!vp.email && <p className="text-slate-500 text-sm mb-4">Khám phá hành trình và thuộc tính của người dùng</p>}
+                {(vp.phoneNumber || vp.customerGroupName) && (
+                  <div className="flex flex-wrap gap-2 mb-4 justify-center">
+                    {vp.phoneNumber && (
+                      <span className="text-[11px] bg-slate-100 border border-slate-200 text-slate-700 px-3 py-1 rounded-full font-medium">
+                        SĐT: {vp.phoneNumber}
+                      </span>
+                    )}
+                    {vp.customerGroupName && (
+                      <span className="text-[11px] bg-violet-50 border border-violet-200 text-violet-700 px-3 py-1 rounded-full font-medium">
+                        Nhóm KH: {vp.customerGroupName}
+                      </span>
+                    )}
+                  </div>
+                )}
                 
                 <div className="flex gap-3">
                   {vp.erpId ? (
