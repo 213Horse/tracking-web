@@ -187,6 +187,17 @@ function parseAnalyticsEventsPerSession(req: Request): number {
   );
 }
 
+function parseEventNameAliases(raw: unknown, defaults: string[]): string[] {
+  const seeded = new Set<string>(defaults.map((n) => n.trim()).filter(Boolean));
+  if (raw == null) return [...seeded];
+  const extra = String(raw)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const n of extra) seeded.add(n);
+  return [...seeded];
+}
+
 /**
  * Không gửi pageNumber/pageSize → legacy: trả mảng Session[], dùng `limit`.
  * Có pageNumber hoặc pageSize → phân trang: trả { items, meta }.
@@ -927,13 +938,29 @@ app.get('/api/v1/analytics/commerce', apiKeyMiddleware, async (req: Request, res
     const previewPage = parseCommercePageParams(req, 'preview');
     const successPage = parseCommercePageParams(req, 'success');
     const rankLimit = parseRankEventsLimit(req);
+    const previewEventNames = parseEventNameAliases(req.query.previewEventNames, [
+      'checkout_preview',
+      'checkout-preview',
+      'checkoutPreview',
+      'preview_orders',
+      'preview-orders',
+    ]);
+    const successEventNames = parseEventNameAliases(req.query.successEventNames, [
+      'checkout_success',
+      'checkout-success',
+      'checkoutSuccess',
+      'order_success',
+      'order-success',
+      'purchase_success',
+      'purchase-success',
+    ]);
 
     const previewWhere = {
-      name: 'checkout_preview' as const,
+      name: { in: previewEventNames },
       timestamp: { gte: since },
     };
     const successWhere = {
-      name: 'checkout_success' as const,
+      name: { in: successEventNames },
       timestamp: { gte: since },
     };
 
@@ -1018,6 +1045,8 @@ app.get('/api/v1/analytics/commerce', apiKeyMiddleware, async (req: Request, res
         rankEventsLimit: rankLimit,
         rankPreviewEventsScanned: rankPreviewRows.length,
         rankSuccessEventsScanned: rankSuccessRows.length,
+        previewEventNames,
+        successEventNames,
       },
     });
   } catch (error: any) {

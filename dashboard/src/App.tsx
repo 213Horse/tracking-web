@@ -232,6 +232,7 @@ const App = () => {
   const [trafficPeak, setTrafficPeak] = useState<TrafficPeakHoursResponse | null>(null);
   const [commerceData, setCommerceData] = useState<CommerceResponse | null>(null);
   const [identifiedUsers, setIdentifiedUsers] = useState<IdentifiedUsersResponse['items']>([]);
+  const [hasInitialLoadSuccess, setHasInitialLoadSuccess] = useState(false);
   const [backupActionLoading, setBackupActionLoading] = useState<'download' | 'restore' | null>(null);
   const [backupActionMessage, setBackupActionMessage] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -275,8 +276,8 @@ const App = () => {
   };
 
   useEffect(() => {
-    const fetchData = () => {
-      if (isFetchingRef.current) return;
+    const fetchData = async (): Promise<boolean> => {
+      if (isFetchingRef.current) return false;
       isFetchingRef.current = true;
       const since = new Date();
       since.setDate(since.getDate() - ANALYTICS_WINDOW_DAYS);
@@ -285,7 +286,8 @@ const App = () => {
         limit: String(ANALYTICS_SESSION_LIMIT),
         eventsPerSession: String(ANALYTICS_EVENTS_PER_SESSION),
       });
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}&_ts=${Date.now()}`, {
+
+      const sessionsRequest = fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}&_ts=${Date.now()}`, {
         headers: {
           'x-api-key': TRACKING_API_KEY,
           'cache-control': 'no-cache',
@@ -324,25 +326,19 @@ const App = () => {
                 events: [...s.events].sort(
                   (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
                 ),
-              }))
+              }));
           setSessions(normalized);
-        })
-        .catch((err) => {
-          console.error(err);
-          setAnalyticsHint('Không thể tải dữ liệu analytics mới nhất. Vui lòng kiểm tra endpoint/API key.');
         });
 
-      trackingApiFetch<{ count: number }>('/api/v1/active-users')
-        .then(data => {
-          setActiveUsers(prev => {
-            setPrevActiveUsers(prev);
-            return data.count;
-          });
-        })
-        .catch(err => console.error(err));
+      const activeUsersRequest = trackingApiFetch<{ count: number }>('/api/v1/active-users').then((data) => {
+        setActiveUsers((prev) => {
+          setPrevActiveUsers(prev);
+          return data.count;
+        });
+      });
 
-      trackingApiFetch<TrafficPeakHoursResponse>(`/api/v1/analytics/traffic-peak-hours?${qs}`)
-        .then((data: TrafficPeakHoursResponse) => {
+      const trafficRequest = trackingApiFetch<TrafficPeakHoursResponse>(`/api/v1/analytics/traffic-peak-hours?${qs}`).then(
+        (data: TrafficPeakHoursResponse) => {
           if (
             data &&
             Array.isArray(data.matrix) &&
@@ -351,8 +347,8 @@ const App = () => {
           ) {
             setTrafficPeak(data);
           }
-        })
-        .catch((err) => console.error(err));
+        }
+      );
 
       const commerceQs = new URLSearchParams({
         since: since.toISOString(),
@@ -362,30 +358,41 @@ const App = () => {
         successPageSize: '25',
         rankEventsLimit: '2000',
       });
-      trackingApiFetch<CommerceResponse>(`/api/v1/analytics/commerce?${commerceQs}`)
-        .then((data: CommerceResponse) => {
+      const commerceRequest = trackingApiFetch<CommerceResponse>(`/api/v1/analytics/commerce?${commerceQs}`).then(
+        (data: CommerceResponse) => {
           if (data?.checkoutPreview?.items && data?.checkoutSuccess?.items) {
             setCommerceData(data);
           }
-        })
-        .catch((err) => console.error(err))
-        .finally(() => {
-          isFetchingRef.current = false;
-        });
+        }
+      );
 
-      trackingApiFetch<IdentifiedUsersResponse>('/api/v1/analytics/identified-users?limit=5000')
-        .then((data) => {
+      const identifiedUsersRequest = trackingApiFetch<IdentifiedUsersResponse>('/api/v1/analytics/identified-users?limit=5000').then(
+        (data) => {
           setIdentifiedUsers(Array.isArray(data?.items) ? data.items : []);
-        })
-        .catch((err) => {
-          console.error(err);
-          setIdentifiedUsers([]);
-        });
+        }
+      );
+
+      try {
+        await Promise.all([
+          sessionsRequest,
+          activeUsersRequest,
+          trafficRequest,
+          commerceRequest,
+          identifiedUsersRequest,
+        ]);
+        return true;
+      } catch (err) {
+        console.error(err);
+        setAnalyticsHint('Lần tải đầu chưa thành công toàn bộ API, hệ thống sẽ thử lại theo chu kỳ.');
+        return false;
+      } finally {
+        isFetchingRef.current = false;
+      }
     };
 
-    const fetchDimensionStats = () => {
+    const fetchDimensionStats = async (): Promise<boolean> => {
       const dim = DIMENSION_TAB_TO_API[activeAnalysisTabRef.current];
-      if (!dim) return;
+      if (!dim) return false;
       const since = new Date();
       since.setDate(since.getDate() - ANALYTICS_WINDOW_DAYS);
       const qs = new URLSearchParams({
@@ -394,7 +401,7 @@ const App = () => {
         limit: String(ANALYTICS_SESSION_LIMIT),
         search: analysisSearchRef.current,
       });
-      trackingApiFetch<{
+      return trackingApiFetch<{
         rows?: Array<{
           dimensionValue: string;
           visitorsCount: number;
@@ -404,43 +411,63 @@ const App = () => {
           avgDurationSec: number;
         }>;
       }>(`/api/v1/analytics/dimension-stats?${qs}`)
-        .then(
-          (data: {
-            rows?: Array<{
-              dimensionValue: string;
-              visitorsCount: number;
-              pageviews: number;
-              sessionsCount: number;
-              bounces: number;
-              avgDurationSec: number;
-            }>;
-          }) => {
-            if (!Array.isArray(data.rows)) return;
-            setAnalysisStats(
-              data.rows.map((row) => ({
-                name: row.dimensionValue,
-                visitorsCount: row.visitorsCount,
-                pageviews: row.pageviews,
-                sessionsCount: row.sessionsCount,
-                bounces: row.bounces,
-                avgDurationSec: row.avgDurationSec,
-              }))
-            );
-          }
-        )
-        .catch((err) => console.error(err));
+        .then((data) => {
+          if (!Array.isArray(data.rows)) return false;
+          setAnalysisStats(
+            data.rows.map((row) => ({
+              name: row.dimensionValue,
+              visitorsCount: row.visitorsCount,
+              pageviews: row.pageviews,
+              sessionsCount: row.sessionsCount,
+              bounces: row.bounces,
+              avgDurationSec: row.avgDurationSec,
+            }))
+          );
+          return true;
+        })
+        .catch((err) => {
+          console.error(err);
+          return false;
+        });
     };
 
-    fetchData();
-    fetchDimensionStats();
-    const interval = setInterval(() => {
-      fetchData();
-      fetchDimensionStats();
-    }, DASHBOARD_POLL_MS);
-    return () => clearInterval(interval);
+    let disposed = false;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let bootstrapRetry: ReturnType<typeof setTimeout> | null = null;
+
+    const pollOnce = async (): Promise<boolean> => {
+      const coreOk = await fetchData();
+      if (!coreOk) return false;
+      const dimensionOk = await fetchDimensionStats();
+      return dimensionOk;
+    };
+
+    const bootstrap = async () => {
+      const ok = await pollOnce();
+      if (disposed) return;
+      if (ok) {
+        setHasInitialLoadSuccess(true);
+        pollInterval = setInterval(() => {
+          void pollOnce();
+        }, DASHBOARD_POLL_MS);
+      } else {
+        setHasInitialLoadSuccess(false);
+        bootstrapRetry = setTimeout(() => {
+          void bootstrap();
+        }, DASHBOARD_POLL_MS);
+      }
+    };
+
+    void bootstrap();
+    return () => {
+      disposed = true;
+      if (pollInterval) clearInterval(pollInterval);
+      if (bootstrapRetry) clearTimeout(bootstrapRetry);
+    };
   }, []);
 
   useEffect(() => {
+    if (!hasInitialLoadSuccess) return;
     const dim = DIMENSION_TAB_TO_API[activeAnalysisTab];
     if (!dim) return;
     const delay = analysisSearch.trim() ? 400 : 0;
@@ -481,7 +508,7 @@ const App = () => {
         .finally(() => setDimensionStatsLoading(false));
     }, delay);
     return () => clearTimeout(t);
-  }, [activeAnalysisTab, analysisSearch]);
+  }, [activeAnalysisTab, analysisSearch, hasInitialLoadSuccess]);
 
   const activeUsersTrend = prevActiveUsers === 0 ? (activeUsers > 0 ? 100 : 0) : ((activeUsers - prevActiveUsers) / prevActiveUsers) * 100;
 

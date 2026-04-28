@@ -147,6 +147,18 @@ function parseOptionalPositiveInt(raw, fallback, min, max) {
 function parseAnalyticsEventsPerSession(req) {
     return parseOptionalPositiveInt(req.query.eventsPerSession, ANALYTICS_MAX_EVENTS_PER_SESSION, 1, ANALYTICS_MAX_EVENTS_PER_SESSION);
 }
+function parseEventNameAliases(raw, defaults) {
+    const seeded = new Set(defaults.map((n) => n.trim()).filter(Boolean));
+    if (raw == null)
+        return [...seeded];
+    const extra = String(raw)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    for (const n of extra)
+        seeded.add(n);
+    return [...seeded];
+}
 /**
  * Không gửi pageNumber/pageSize → legacy: trả mảng Session[], dùng `limit`.
  * Có pageNumber hoặc pageSize → phân trang: trả { items, meta }.
@@ -823,12 +835,28 @@ app.get('/api/v1/analytics/commerce', apiKeyMiddleware, async (req, res) => {
         const previewPage = (0, commerce_analytics_1.parseCommercePageParams)(req, 'preview');
         const successPage = (0, commerce_analytics_1.parseCommercePageParams)(req, 'success');
         const rankLimit = (0, commerce_analytics_1.parseRankEventsLimit)(req);
+        const previewEventNames = parseEventNameAliases(req.query.previewEventNames, [
+            'checkout_preview',
+            'checkout-preview',
+            'checkoutPreview',
+            'preview_orders',
+            'preview-orders',
+        ]);
+        const successEventNames = parseEventNameAliases(req.query.successEventNames, [
+            'checkout_success',
+            'checkout-success',
+            'checkoutSuccess',
+            'order_success',
+            'order-success',
+            'purchase_success',
+            'purchase-success',
+        ]);
         const previewWhere = {
-            name: 'checkout_preview',
+            name: { in: previewEventNames },
             timestamp: { gte: since },
         };
         const successWhere = {
-            name: 'checkout_success',
+            name: { in: successEventNames },
             timestamp: { gte: since },
         };
         const sessionInclude = {
@@ -897,6 +925,8 @@ app.get('/api/v1/analytics/commerce', apiKeyMiddleware, async (req, res) => {
                 rankEventsLimit: rankLimit,
                 rankPreviewEventsScanned: rankPreviewRows.length,
                 rankSuccessEventsScanned: rankSuccessRows.length,
+                previewEventNames,
+                successEventNames,
             },
         });
     }
