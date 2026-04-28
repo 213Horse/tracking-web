@@ -672,7 +672,13 @@ app.post('/api/v1/identify', apiKeyMiddleware, async (req: Request, res: Respons
 app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res: Response) => {
   try {
     const parsed = parseAnalyticsSessionsListQuery(req);
-    const where = { startedAt: { gte: parsed.since } };
+    const where: Prisma.SessionWhereInput = {
+      OR: [
+        { startedAt: { gte: parsed.since } },
+        { updatedAt: { gte: parsed.since } },
+        { events: { some: { timestamp: { gte: parsed.since } } } },
+      ],
+    };
     const includeEvents = parseBooleanQuery(req.query.includeEvents, true);
     const eventsPerSession = parseAnalyticsEventsPerSession(req);
     const sessionSelect = {
@@ -690,6 +696,7 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res
       ...(includeEvents
         ? {
             events: {
+              where: { timestamp: { gte: parsed.since } },
               orderBy: { timestamp: 'desc' as const },
               take: eventsPerSession,
             },
@@ -710,7 +717,7 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res
         prisma.session.findMany({
           where,
           select: sessionSelect,
-          orderBy: { startedAt: 'desc' },
+          orderBy: { updatedAt: 'desc' },
           skip,
           take: pageSize,
         }),
@@ -739,7 +746,7 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req: Request, res
     const sessions = await prisma.session.findMany({
       where,
       select: sessionSelect,
-      orderBy: { startedAt: 'desc' },
+      orderBy: { updatedAt: 'desc' },
       take: parsed.limit,
     });
 
@@ -857,6 +864,60 @@ app.get('/api/v1/analytics/events', apiKeyMiddleware, async (req: Request, res: 
 });
 
 /**
+ * Danh sách user đã định danh lấy trực tiếp từ bảng User/IdentityMapping
+ * (không phụ thuộc cửa sổ sessions analytics).
+ */
+app.get('/api/v1/analytics/identified-users', apiKeyMiddleware, async (req: Request, res: Response) => {
+  try {
+    const limit = parseOptionalPositiveInt(req.query.limit, 2000, 1, ANALYTICS_MAX_LIMIT);
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        erpId: true,
+        createdAt: true,
+        identityMappings: {
+          select: {
+            linkedAt: true,
+            visitorId: true,
+          },
+          orderBy: { linkedAt: 'asc' },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    const rows = users.map((u) => {
+      const firstLinkedAt = u.identityMappings.length > 0 ? u.identityMappings[0].linkedAt : u.createdAt;
+      return {
+        user: {
+          id: u.id,
+          email: u.email,
+          name: u.name,
+          erpId: u.erpId,
+        },
+        linkedDevices: u.identityMappings.length,
+        visitorIds: u.identityMappings.map((m) => m.visitorId),
+        firstLinkedAt: firstLinkedAt.toISOString(),
+      };
+    });
+
+    res.setHeader('X-Analytics-Limit', String(limit));
+    return res.json({
+      items: rows,
+      meta: {
+        total: rows.length,
+        limit,
+      },
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
+  }
+});
+
+/**
  * Thương mại: preview giỏ (checkout_preview) + đơn thành công (checkout_success),
  * kèm bảng xếp hạng sản phẩm — phân trang độc lập cho 2 danh sách.
  */
@@ -869,11 +930,11 @@ app.get('/api/v1/analytics/commerce', apiKeyMiddleware, async (req: Request, res
 
     const previewWhere = {
       name: 'checkout_preview' as const,
-      session: { startedAt: { gte: since } },
+      timestamp: { gte: since },
     };
     const successWhere = {
       name: 'checkout_success' as const,
-      session: { startedAt: { gte: since } },
+      timestamp: { gte: since },
     };
 
     const sessionInclude = {
@@ -972,9 +1033,15 @@ app.get('/api/v1/analytics/traffic-peak-hours', apiKeyMiddleware, async (req: Re
     const { since, limit } = parseAnalyticsSinceLimit(req);
 
     const sessions = await prisma.session.findMany({
-      where: { startedAt: { gte: since } },
+      where: {
+        OR: [
+          { startedAt: { gte: since } },
+          { updatedAt: { gte: since } },
+          { events: { some: { timestamp: { gte: since } } } },
+        ],
+      },
       select: { startedAt: true },
-      orderBy: { startedAt: 'desc' },
+      orderBy: { updatedAt: 'desc' },
       take: limit,
     });
 
@@ -1065,7 +1132,13 @@ app.get('/api/v1/analytics/dimension-stats', apiKeyMiddleware, async (req: Reque
     }
 
     const slim = await prisma.session.findMany({
-      where: { startedAt: { gte: since } },
+      where: {
+        OR: [
+          { startedAt: { gte: since } },
+          { updatedAt: { gte: since } },
+          { events: { some: { timestamp: { gte: since } } } },
+        ],
+      },
       select: {
         id: true,
         visitorId: true,
@@ -1075,12 +1148,13 @@ app.get('/api/v1/analytics/dimension-stats', apiKeyMiddleware, async (req: Reque
         location: true,
         userAgent: true,
         events: {
+          where: { timestamp: { gte: since } },
           orderBy: { timestamp: 'desc' },
           take: ANALYTICS_MAX_EVENTS_PER_SESSION,
           select: { name: true, timestamp: true, properties: true },
         },
       },
-      orderBy: { startedAt: 'desc' },
+      orderBy: { updatedAt: 'desc' },
       take: limit,
     });
 
@@ -1131,7 +1205,13 @@ app.get('/api/v1/active-users', apiKeyMiddleware, async (req, res) => {
     const { since, limit } = parseAnalyticsSinceLimit(req);
     const kpiSessionsScanned = resolveActiveUsersKpiSessionTake(req, limit);
 
-    const sessionWhere = { startedAt: { gte: since } };
+    const sessionWhere: Prisma.SessionWhereInput = {
+      OR: [
+        { startedAt: { gte: since } },
+        { updatedAt: { gte: since } },
+        { events: { some: { timestamp: { gte: since } } } },
+      ],
+    };
     const [sessionsInWindow, slimForKpis] = await prisma.$transaction([
       prisma.session.count({ where: sessionWhere }),
       prisma.session.findMany({
@@ -1141,12 +1221,13 @@ app.get('/api/v1/active-users', apiKeyMiddleware, async (req, res) => {
           startedAt: true,
           updatedAt: true,
           events: {
+            where: { timestamp: { gte: since } },
             orderBy: { timestamp: 'desc' },
             take: ANALYTICS_MAX_EVENTS_PER_SESSION,
             select: { name: true },
           },
         },
-        orderBy: { startedAt: 'desc' },
+        orderBy: { updatedAt: 'desc' },
         take: kpiSessionsScanned,
       }),
     ]);

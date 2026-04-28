@@ -151,6 +151,24 @@ interface CommerceResponse {
   productPurchasedRank: Array<{ name: string; count: number }>;
 }
 
+interface IdentifiedUsersResponse {
+  items: Array<{
+    user: {
+      id: string;
+      email?: string;
+      name?: string;
+      erpId?: string;
+    };
+    linkedDevices: number;
+    visitorIds: string[];
+    firstLinkedAt: string;
+  }>;
+  meta: {
+    total: number;
+    limit: number;
+  };
+}
+
 function commerceCustomerFromSession(s: Session): { label: string; title: string } {
   const user = s.visitor.identityMapping?.user;
   const label =
@@ -213,6 +231,7 @@ const App = () => {
   const [dimensionStatsLoading, setDimensionStatsLoading] = useState(false);
   const [trafficPeak, setTrafficPeak] = useState<TrafficPeakHoursResponse | null>(null);
   const [commerceData, setCommerceData] = useState<CommerceResponse | null>(null);
+  const [identifiedUsers, setIdentifiedUsers] = useState<IdentifiedUsersResponse['items']>([]);
   const [backupActionLoading, setBackupActionLoading] = useState<'download' | 'restore' | null>(null);
   const [backupActionMessage, setBackupActionMessage] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -352,6 +371,15 @@ const App = () => {
         .catch((err) => console.error(err))
         .finally(() => {
           isFetchingRef.current = false;
+        });
+
+      trackingApiFetch<IdentifiedUsersResponse>('/api/v1/analytics/identified-users?limit=5000')
+        .then((data) => {
+          setIdentifiedUsers(Array.isArray(data?.items) ? data.items : []);
+        })
+        .catch((err) => {
+          console.error(err);
+          setIdentifiedUsers([]);
         });
     };
 
@@ -1465,25 +1493,7 @@ const App = () => {
               </thead>
               <tbody className="divide-y divide-[#334155]">
                 {(() => {
-                  const uniqueUsersMap = new Map();
-                  sessions.filter(s => s.visitor.identityMapping?.user).forEach(s => {
-                    const user = s.visitor.identityMapping!.user!;
-                    if (!uniqueUsersMap.has(user.id)) {
-                      uniqueUsersMap.set(user.id, {
-                        user,
-                        firstLinked: s.startedAt,
-                        visitorIds: [s.visitorId]
-                      });
-                    } else {
-                      const entry = uniqueUsersMap.get(user.id);
-                      if (!entry.visitorIds.includes(s.visitorId)) entry.visitorIds.push(s.visitorId);
-                      if (new Date(s.startedAt) < new Date(entry.firstLinked)) entry.firstLinked = s.startedAt;
-                    }
-                  });
-                  
-                  const uniqueUsers = Array.from(uniqueUsersMap.values());
-                  
-                  if (uniqueUsers.length === 0) {
+                  if (identifiedUsers.length === 0) {
                     return (
                       <tr>
                         <td colSpan={4} className="px-6 py-10 text-center text-slate-500 italic">No identified users found.</td>
@@ -1491,14 +1501,14 @@ const App = () => {
                     );
                   }
 
-                  return uniqueUsers.map((u, idx) => (
-                    <tr key={idx} className="hover:bg-[#334155]/50 transition-all border-b border-[#334155]">
-                      <td className="px-6 py-4 text-white font-medium">{u.user.name || u.user.email}</td>
+                  return identifiedUsers.map((u) => (
+                    <tr key={u.user.id} className="hover:bg-[#334155]/50 transition-all border-b border-[#334155]">
+                      <td className="px-6 py-4 text-white font-medium">{u.user.name || u.user.email || u.user.id}</td>
                       <td className="px-6 py-4 text-slate-400 font-mono text-xs font-bold text-indigo-400">{u.user.erpId || '-'}</td>
                       <td className="px-6 py-4 text-slate-500 font-mono text-xs uppercase">
-                        {u.visitorIds.length} Device{u.visitorIds.length > 1 ? 's' : ''}
+                        {u.linkedDevices} Device{u.linkedDevices > 1 ? 's' : ''}
                       </td>
-                      <td className="px-6 py-4 text-slate-400">{formatFullDate(u.firstLinked)}</td>
+                      <td className="px-6 py-4 text-slate-400">{formatFullDate(u.firstLinkedAt)}</td>
                     </tr>
                   ));
                 })()}
