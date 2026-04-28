@@ -29,6 +29,8 @@ model Session {
 
   @@index([visitorId])
   @@index([startedAt])
+  @@index([updatedAt])
+  @@index([endedAt, updatedAt])
 }
 
 model Event {
@@ -40,6 +42,7 @@ model Event {
   timestamp DateTime @default(now())
 
   @@index([sessionId])
+  @@index([sessionId, timestamp])
   @@index([timestamp])
   @@index([name])
   @@index([name, timestamp])

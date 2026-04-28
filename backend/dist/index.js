@@ -126,6 +126,27 @@ function parseAnalyticsSinceLimit(req) {
     limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
     return { since: parseAnalyticsSince(req), limit };
 }
+function parseBooleanQuery(raw, defaultValue) {
+    if (raw == null)
+        return defaultValue;
+    const v = String(raw).trim().toLowerCase();
+    if (v === '')
+        return defaultValue;
+    if (['1', 'true', 'yes', 'y', 'on'].includes(v))
+        return true;
+    if (['0', 'false', 'no', 'n', 'off'].includes(v))
+        return false;
+    return defaultValue;
+}
+function parseOptionalPositiveInt(raw, fallback, min, max) {
+    const parsed = parseInt(String(raw ?? ''), 10);
+    if (Number.isNaN(parsed) || parsed < min)
+        return fallback;
+    return Math.min(parsed, max);
+}
+function parseAnalyticsEventsPerSession(req) {
+    return parseOptionalPositiveInt(req.query.eventsPerSession, ANALYTICS_MAX_EVENTS_PER_SESSION, 1, ANALYTICS_MAX_EVENTS_PER_SESSION);
+}
 /**
  * Không gửi pageNumber/pageSize → legacy: trả mảng Session[], dùng `limit`.
  * Có pageNumber hoặc pageSize → phân trang: trả { items, meta }.
@@ -566,15 +587,32 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req, res) => {
     try {
         const parsed = parseAnalyticsSessionsListQuery(req);
         const where = { startedAt: { gte: parsed.since } };
-        const includeBlock = {
-            events: {
-                orderBy: { timestamp: 'desc' },
-                take: ANALYTICS_MAX_EVENTS_PER_SESSION,
-            },
+        const includeEvents = parseBooleanQuery(req.query.includeEvents, true);
+        const eventsPerSession = parseAnalyticsEventsPerSession(req);
+        const sessionSelect = {
+            id: true,
+            visitorId: true,
+            startedAt: true,
+            updatedAt: true,
+            endedAt: true,
+            device: true,
+            ip: true,
+            location: true,
+            userAgent: true,
             visitor: { include: { identityMapping: { include: { user: true } } } },
+            _count: { select: { events: true } },
+            ...(includeEvents
+                ? {
+                    events: {
+                        orderBy: { timestamp: 'desc' },
+                        take: eventsPerSession,
+                    },
+                }
+                : {}),
         };
         res.setHeader('X-Analytics-Since', parsed.since.toISOString());
-        res.setHeader('X-Analytics-Events-Cap', String(ANALYTICS_MAX_EVENTS_PER_SESSION));
+        res.setHeader('X-Analytics-Include-Events', includeEvents ? '1' : '0');
+        res.setHeader('X-Analytics-Events-Cap', String(eventsPerSession));
         if (parsed.kind === 'paged') {
             const { pageNumber, pageSize } = parsed;
             const skip = (pageNumber - 1) * pageSize;
@@ -582,7 +620,7 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req, res) => {
                 prisma.session.count({ where }),
                 prisma.session.findMany({
                     where,
-                    include: includeBlock,
+                    select: sessionSelect,
                     orderBy: { startedAt: 'desc' },
                     skip,
                     take: pageSize,
@@ -607,12 +645,110 @@ app.get('/api/v1/analytics/sessions', apiKeyMiddleware, async (req, res) => {
         }
         const sessions = await prisma.session.findMany({
             where,
-            include: includeBlock,
+            select: sessionSelect,
             orderBy: { startedAt: 'desc' },
             take: parsed.limit,
         });
         res.setHeader('X-Analytics-Limit', String(parsed.limit));
         res.json(sessions);
+    }
+    catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+/**
+ * Raw events cho tab sự kiện: query trực tiếp Event thay vì flatten Session.events bên client.
+ * Mặc định hỗ trợ legacy `limit`; có pageNumber/pageSize thì trả dạng phân trang.
+ */
+app.get('/api/v1/analytics/events', apiKeyMiddleware, async (req, res) => {
+    try {
+        const since = parseAnalyticsSince(req);
+        const limit = parseOptionalPositiveInt(req.query.limit, Math.min(1000, ANALYTICS_MAX_LIMIT), 1, ANALYTICS_MAX_LIMIT);
+        const eventName = String(req.query.name ?? '').trim();
+        const visitorId = String(req.query.visitorId ?? '').trim();
+        const sessionId = String(req.query.sessionId ?? '').trim();
+        const pnRaw = req.query.pageNumber;
+        const psRaw = req.query.pageSize;
+        const hasPaged = (pnRaw != null && String(pnRaw).trim() !== '') || (psRaw != null && String(psRaw).trim() !== '');
+        const pageNumber = parseOptionalPositiveInt(pnRaw, 1, 1, Number.MAX_SAFE_INTEGER);
+        const pageSize = parseOptionalPositiveInt(psRaw, 100, 1, ANALYTICS_MAX_LIMIT);
+        const skip = hasPaged ? (pageNumber - 1) * pageSize : 0;
+        const take = hasPaged ? pageSize : limit;
+        const where = {
+            timestamp: { gte: since },
+            ...(eventName ? { name: eventName } : {}),
+            ...(sessionId ? { sessionId } : {}),
+            ...(visitorId ? { session: { visitorId } } : {}),
+        };
+        const eventSelect = {
+            id: true,
+            name: true,
+            timestamp: true,
+            properties: true,
+            sessionId: true,
+            session: {
+                select: {
+                    id: true,
+                    visitorId: true,
+                    startedAt: true,
+                    updatedAt: true,
+                    ip: true,
+                    device: true,
+                    visitor: {
+                        select: {
+                            identityMapping: {
+                                select: {
+                                    user: {
+                                        select: {
+                                            id: true,
+                                            email: true,
+                                            name: true,
+                                            erpId: true,
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        res.setHeader('X-Analytics-Since', since.toISOString());
+        if (hasPaged) {
+            const [total, items] = await prisma.$transaction([
+                prisma.event.count({ where }),
+                prisma.event.findMany({
+                    where,
+                    select: eventSelect,
+                    orderBy: { timestamp: 'desc' },
+                    skip,
+                    take,
+                }),
+            ]);
+            const totalPages = total === 0 ? 0 : Math.ceil(total / pageSize);
+            res.setHeader('X-Analytics-Total', String(total));
+            res.setHeader('X-Analytics-Page', String(pageNumber));
+            res.setHeader('X-Analytics-Page-Size', String(pageSize));
+            res.setHeader('X-Analytics-Page-Count', String(totalPages));
+            return res.json({
+                items,
+                meta: {
+                    total,
+                    pageNumber,
+                    pageSize,
+                    totalPages,
+                    since: since.toISOString(),
+                },
+            });
+        }
+        const items = await prisma.event.findMany({
+            where,
+            select: eventSelect,
+            orderBy: { timestamp: 'desc' },
+            take,
+        });
+        res.setHeader('X-Analytics-Limit', String(take));
+        return res.json(items);
     }
     catch (error) {
         res.status(500).json({ error: error.message });

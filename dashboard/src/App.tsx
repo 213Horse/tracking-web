@@ -15,7 +15,17 @@ const isoToId: { [key: string]: string } = {
 
 const idToIso: { [key: string]: string } = Object.fromEntries(Object.entries(isoToId).map(([k, v]) => [v, k]));
 
-const TRACKING_API_BASE = import.meta.env.VITE_TRACKING_API || 'http://localhost:3001';
+function normalizeTrackingApiBase(rawBase: string): string {
+  const trimmed = (rawBase || '').trim().replace(/\/+$/, '');
+  if (!trimmed) return 'http://localhost:3001';
+  // Production domains should use HTTPS directly to avoid redirect latency.
+  if (/^http:\/\//i.test(trimmed) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(trimmed)) {
+    return trimmed.replace(/^http:\/\//i, 'https://');
+  }
+  return trimmed;
+}
+
+const TRACKING_API_BASE = normalizeTrackingApiBase(import.meta.env.VITE_TRACKING_API || 'http://localhost:3001');
 /** Trùng với TRACKING_API_KEY trên backend (snippet & dashboard). */
 const TRACKING_API_KEY = import.meta.env.VITE_TRACKING_API_KEY || 'default_secret_key';
 const ANALYTICS_WINDOW_DAYS = Math.min(
@@ -26,7 +36,37 @@ const ANALYTICS_SESSION_LIMIT = Math.min(
   Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_LIMIT || '1000'), 10) || 1000, 100),
   50000
 );
+const ANALYTICS_EVENTS_PER_SESSION = Math.min(
+  Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_EVENTS_PER_SESSION || '120'), 10) || 120, 1),
+  50000
+);
 const DASHBOARD_POLL_MS = Math.max(parseInt(String(import.meta.env.VITE_DASHBOARD_POLL_MS || '30000'), 10) || 30000, 5000);
+const API_FETCH_TIMEOUT_MS = Math.max(parseInt(String(import.meta.env.VITE_API_TIMEOUT_MS || '15000'), 10) || 15000, 3000);
+
+async function trackingApiFetch<T>(pathWithQuery: string): Promise<T> {
+  const url = `${TRACKING_API_BASE}${pathWithQuery}`;
+  const sep = pathWithQuery.includes('?') ? '&' : '?';
+  const noCacheUrl = `${url}${sep}_ts=${Date.now()}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(noCacheUrl, {
+      headers: {
+        'x-api-key': TRACKING_API_KEY,
+        'cache-control': 'no-cache',
+        pragma: 'no-cache',
+      },
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} (${res.statusText}) for ${pathWithQuery}`);
+    }
+    return (await res.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 /** Tab UI → query `dimension` của GET /api/v1/analytics/dimension-stats */
 const DIMENSION_TAB_TO_API: Record<string, string> = {
@@ -224,11 +264,18 @@ const App = () => {
       const qs = new URLSearchParams({
         since: since.toISOString(),
         limit: String(ANALYTICS_SESSION_LIMIT),
+        eventsPerSession: String(ANALYTICS_EVENTS_PER_SESSION),
       });
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}`, {
-        headers: { 'x-api-key': TRACKING_API_KEY },
+      fetch(`${TRACKING_API_BASE}/api/v1/analytics/sessions?${qs}&_ts=${Date.now()}`, {
+        headers: {
+          'x-api-key': TRACKING_API_KEY,
+          'cache-control': 'no-cache',
+          pragma: 'no-cache',
+        },
+        cache: 'no-store',
       })
-        .then((res) => {
+        .then(async (res) => {
+          if (!res.ok) throw new Error(`HTTP ${res.status} (${res.statusText}) for /analytics/sessions`);
           const cap = res.headers.get('X-Analytics-Events-Cap');
           const lim = res.headers.get('X-Analytics-Limit');
           const sinceH = res.headers.get('X-Analytics-Since');
@@ -244,7 +291,8 @@ const App = () => {
           }
           return res.json();
         })
-        .then((data: Session[]) => {
+        .then((data: Session[] | { items?: Session[] }) => {
+          const sessionsPayload = Array.isArray(data) ? data : Array.isArray(data?.items) ? data.items : [];
           const normalized = Array.isArray(data)
             ? data.map((s) => ({
                 ...s,
@@ -252,15 +300,20 @@ const App = () => {
                   (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
                 ),
               }))
-            : [];
+            : sessionsPayload.map((s) => ({
+                ...s,
+                events: [...s.events].sort(
+                  (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+                ),
+              }))
           setSessions(normalized);
         })
-        .catch((err) => console.error(err));
+        .catch((err) => {
+          console.error(err);
+          setAnalyticsHint('Không thể tải dữ liệu analytics mới nhất. Vui lòng kiểm tra endpoint/API key.');
+        });
 
-      fetch(`${TRACKING_API_BASE}/api/v1/active-users`, {
-        headers: { 'x-api-key': TRACKING_API_KEY },
-      })
-        .then(res => res.json())
+      trackingApiFetch<{ count: number }>('/api/v1/active-users')
         .then(data => {
           setActiveUsers(prev => {
             setPrevActiveUsers(prev);
@@ -269,10 +322,7 @@ const App = () => {
         })
         .catch(err => console.error(err));
 
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/traffic-peak-hours?${qs}`, {
-        headers: { 'x-api-key': TRACKING_API_KEY },
-      })
-        .then((res) => res.json())
+      trackingApiFetch<TrafficPeakHoursResponse>(`/api/v1/analytics/traffic-peak-hours?${qs}`)
         .then((data: TrafficPeakHoursResponse) => {
           if (
             data &&
@@ -293,10 +343,7 @@ const App = () => {
         successPageSize: '25',
         rankEventsLimit: '2000',
       });
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/commerce?${commerceQs}`, {
-        headers: { 'x-api-key': TRACKING_API_KEY },
-      })
-        .then((res) => res.json())
+      trackingApiFetch<CommerceResponse>(`/api/v1/analytics/commerce?${commerceQs}`)
         .then((data: CommerceResponse) => {
           if (data?.checkoutPreview?.items && data?.checkoutSuccess?.items) {
             setCommerceData(data);
@@ -319,10 +366,16 @@ const App = () => {
         limit: String(ANALYTICS_SESSION_LIMIT),
         search: analysisSearchRef.current,
       });
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/dimension-stats?${qs}`, {
-        headers: { 'x-api-key': TRACKING_API_KEY },
-      })
-        .then((res) => res.json())
+      trackingApiFetch<{
+        rows?: Array<{
+          dimensionValue: string;
+          visitorsCount: number;
+          pageviews: number;
+          sessionsCount: number;
+          bounces: number;
+          avgDurationSec: number;
+        }>;
+      }>(`/api/v1/analytics/dimension-stats?${qs}`)
         .then(
           (data: {
             rows?: Array<{
@@ -373,34 +426,29 @@ const App = () => {
         search: analysisSearch,
       });
       setDimensionStatsLoading(true);
-      fetch(`${TRACKING_API_BASE}/api/v1/analytics/dimension-stats?${qs}`, {
-        headers: { 'x-api-key': TRACKING_API_KEY },
-      })
-        .then((res) => res.json())
-        .then(
-          (data: {
-            rows?: Array<{
-              dimensionValue: string;
-              visitorsCount: number;
-              pageviews: number;
-              sessionsCount: number;
-              bounces: number;
-              avgDurationSec: number;
-            }>;
-          }) => {
-            if (!Array.isArray(data.rows)) return;
-            setAnalysisStats(
-              data.rows.map((row) => ({
-                name: row.dimensionValue,
-                visitorsCount: row.visitorsCount,
-                pageviews: row.pageviews,
-                sessionsCount: row.sessionsCount,
-                bounces: row.bounces,
-                avgDurationSec: row.avgDurationSec,
-              }))
-            );
-          }
-        )
+      trackingApiFetch<{
+        rows?: Array<{
+          dimensionValue: string;
+          visitorsCount: number;
+          pageviews: number;
+          sessionsCount: number;
+          bounces: number;
+          avgDurationSec: number;
+        }>;
+      }>(`/api/v1/analytics/dimension-stats?${qs}`)
+        .then((data) => {
+          if (!Array.isArray(data.rows)) return;
+          setAnalysisStats(
+            data.rows.map((row) => ({
+              name: row.dimensionValue,
+              visitorsCount: row.visitorsCount,
+              pageviews: row.pageviews,
+              sessionsCount: row.sessionsCount,
+              bounces: row.bounces,
+              avgDurationSec: row.avgDurationSec,
+            }))
+          );
+        })
         .catch((err) => console.error(err))
         .finally(() => setDimensionStatsLoading(false));
     }, delay);
