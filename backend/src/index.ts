@@ -48,11 +48,11 @@ const ANALYTICS_DEFAULT_DAYS = Math.min(
   365
 );
 const ANALYTICS_MAX_LIMIT = Math.min(
-  Math.max(parseInt(process.env.ANALYTICS_MAX_LIMIT || '8000', 10) || 8000, 100),
+  Math.max(parseInt(process.env.ANALYTICS_MAX_LIMIT || '3000', 10) || 3000, 100),
   50000
 );
 const ANALYTICS_MAX_EVENTS_PER_SESSION = Math.min(
-  Math.max(parseInt(process.env.ANALYTICS_MAX_EVENTS_PER_SESSION || '4000', 10) || 4000, 100),
+  Math.max(parseInt(process.env.ANALYTICS_MAX_EVENTS_PER_SESSION || '500', 10) || 500, 50),
   50000
 );
 /** TTL cache JSON tổng hợp dimension (giây). 0 = không cache. */
@@ -153,7 +153,7 @@ function parseAnalyticsSince(req: Request): Date {
 
 function parseAnalyticsSinceLimit(req: Request): { since: Date; limit: number } {
   let limit = parseInt(String(req.query.limit ?? ''), 10);
-  if (Number.isNaN(limit) || limit < 1) limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
+  if (Number.isNaN(limit) || limit < 1) limit = Math.min(1000, ANALYTICS_MAX_LIMIT);
   limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
   return { since: parseAnalyticsSince(req), limit };
 }
@@ -182,7 +182,7 @@ function parseAnalyticsSessionsListQuery(
   }
 
   let limit = parseInt(String(req.query.limit ?? ''), 10);
-  if (Number.isNaN(limit) || limit < 1) limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
+  if (Number.isNaN(limit) || limit < 1) limit = Math.min(1000, ANALYTICS_MAX_LIMIT);
   limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
   return { kind: 'legacy', since, limit };
 }

@@ -34,8 +34,8 @@ const DB_BACKUP_MAX_SIZE_MB = Math.max(1, parseInt(process.env.DB_BACKUP_MAX_SIZ
 const DB_BACKUP_MAX_SIZE_BYTES = DB_BACKUP_MAX_SIZE_MB * 1024 * 1024;
 /** Mặc định chỉ tải phiên trong N ngày gần đây (tránh OOM). */
 const ANALYTICS_DEFAULT_DAYS = Math.min(Math.max(parseInt(process.env.ANALYTICS_DEFAULT_DAYS || '30', 10) || 30, 1), 365);
-const ANALYTICS_MAX_LIMIT = Math.min(Math.max(parseInt(process.env.ANALYTICS_MAX_LIMIT || '8000', 10) || 8000, 100), 50000);
-const ANALYTICS_MAX_EVENTS_PER_SESSION = Math.min(Math.max(parseInt(process.env.ANALYTICS_MAX_EVENTS_PER_SESSION || '4000', 10) || 4000, 100), 50000);
+const ANALYTICS_MAX_LIMIT = Math.min(Math.max(parseInt(process.env.ANALYTICS_MAX_LIMIT || '3000', 10) || 3000, 100), 50000);
+const ANALYTICS_MAX_EVENTS_PER_SESSION = Math.min(Math.max(parseInt(process.env.ANALYTICS_MAX_EVENTS_PER_SESSION || '500', 10) || 500, 50), 50000);
 /** TTL cache JSON tổng hợp dimension (giây). 0 = không cache. */
 const ANALYTICS_DIMENSION_CACHE_TTL_SEC = Math.max(0, parseInt(process.env.ANALYTICS_DIMENSION_CACHE_TTL_SEC || '90', 10) || 0);
 const isMissingAnalyticsDimensionCacheTable = (error) => {
@@ -122,7 +122,7 @@ function parseAnalyticsSince(req) {
 function parseAnalyticsSinceLimit(req) {
     let limit = parseInt(String(req.query.limit ?? ''), 10);
     if (Number.isNaN(limit) || limit < 1)
-        limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
+        limit = Math.min(1000, ANALYTICS_MAX_LIMIT);
     limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
     return { since: parseAnalyticsSince(req), limit };
 }
@@ -147,7 +147,7 @@ function parseAnalyticsSessionsListQuery(req) {
     }
     let limit = parseInt(String(req.query.limit ?? ''), 10);
     if (Number.isNaN(limit) || limit < 1)
-        limit = Math.min(5000, ANALYTICS_MAX_LIMIT);
+        limit = Math.min(1000, ANALYTICS_MAX_LIMIT);
     limit = Math.min(limit, ANALYTICS_MAX_LIMIT);
     return { kind: 'legacy', since, limit };
 }

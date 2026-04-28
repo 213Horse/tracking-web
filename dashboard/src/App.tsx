@@ -23,9 +23,10 @@ const ANALYTICS_WINDOW_DAYS = Math.min(
   365
 );
 const ANALYTICS_SESSION_LIMIT = Math.min(
-  Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_LIMIT || '8000'), 10) || 8000, 100),
+  Math.max(parseInt(String(import.meta.env.VITE_ANALYTICS_LIMIT || '1000'), 10) || 1000, 100),
   50000
 );
+const DASHBOARD_POLL_MS = Math.max(parseInt(String(import.meta.env.VITE_DASHBOARD_POLL_MS || '30000'), 10) || 30000, 5000);
 
 /** Tab UI → query `dimension` của GET /api/v1/analytics/dimension-stats */
 const DIMENSION_TAB_TO_API: Record<string, string> = {
@@ -175,6 +176,7 @@ const App = () => {
   const [backupActionLoading, setBackupActionLoading] = useState<'download' | 'restore' | null>(null);
   const [backupActionMessage, setBackupActionMessage] = useState<string | null>(null);
   const backupFileInputRef = useRef<HTMLInputElement | null>(null);
+  const isFetchingRef = useRef(false);
 
   const activeAnalysisTabRef = useRef(activeAnalysisTab);
   const analysisSearchRef = useRef(analysisSearch);
@@ -215,6 +217,8 @@ const App = () => {
 
   useEffect(() => {
     const fetchData = () => {
+      if (isFetchingRef.current) return;
+      isFetchingRef.current = true;
       const since = new Date();
       since.setDate(since.getDate() - ANALYTICS_WINDOW_DAYS);
       const qs = new URLSearchParams({
@@ -298,7 +302,10 @@ const App = () => {
             setCommerceData(data);
           }
         })
-        .catch((err) => console.error(err));
+        .catch((err) => console.error(err))
+        .finally(() => {
+          isFetchingRef.current = false;
+        });
     };
 
     const fetchDimensionStats = () => {
@@ -348,7 +355,7 @@ const App = () => {
     const interval = setInterval(() => {
       fetchData();
       fetchDimensionStats();
-    }, 10000);
+    }, DASHBOARD_POLL_MS);
     return () => clearInterval(interval);
   }, []);
 
