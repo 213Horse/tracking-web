@@ -787,7 +787,7 @@ const App = () => {
               <input
                 ref={backupFileInputRef}
                 type="file"
-                accept=".sql,text/plain"
+                accept=".sql,.json,text/plain,application/json"
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0];

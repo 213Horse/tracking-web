@@ -24,6 +24,7 @@ dotenv_1.default.config();
 const app = (0, express_1.default)();
 const prisma = new client_1.PrismaClient();
 const execFileAsync = (0, node_util_1.promisify)(node_child_process_1.execFile);
+let isBackupOrRestoreRunning = false;
 const PORT = process.env.PORT || 3001;
 /** Khóa cố định: đặt TRACKING_API_KEY trong .env (production bắt buộc đổi khỏi default). */
 const API_KEY = process.env.TRACKING_API_KEY || 'default_secret_key';
@@ -224,7 +225,122 @@ function buildBackupFileName() {
     const ss = String(now.getSeconds()).padStart(2, '0');
     return `tracking-backup-${yyyy}${mm}${dd}-${hh}${mi}${ss}.sql`;
 }
+function buildBackupJsonFileName() {
+    const now = new Date();
+    const yyyy = now.getFullYear();
+    const mm = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mi = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    return `tracking-backup-${yyyy}${mm}${dd}-${hh}${mi}${ss}.json`;
+}
+async function buildPrismaJsonBackup() {
+    const visitors = await prisma.visitor.findMany({ orderBy: { createdAt: 'asc' } });
+    const users = await prisma.user.findMany({ orderBy: { createdAt: 'asc' } });
+    const identityMappings = await prisma.identityMapping.findMany({ orderBy: { id: 'asc' } });
+    const sessions = await prisma.session.findMany({ orderBy: { startedAt: 'asc' } });
+    const events = await prisma.event.findMany({ orderBy: { timestamp: 'asc' } });
+    const analyticsDimensionCaches = await prisma.analyticsDimensionCache.findMany({ orderBy: { computedAt: 'asc' } });
+    return {
+        format: 'tracking-json-v1',
+        createdAt: new Date().toISOString(),
+        data: {
+            visitors,
+            users,
+            identityMappings,
+            sessions,
+            events,
+            analyticsDimensionCaches,
+        },
+    };
+}
+async function restoreFromPrismaJsonBackup(payload) {
+    if (payload?.format !== 'tracking-json-v1' || !payload?.data) {
+        throw new Error('Invalid JSON backup format');
+    }
+    const data = payload.data;
+    const visitors = Array.isArray(data.visitors) ? data.visitors : [];
+    const users = Array.isArray(data.users) ? data.users : [];
+    const identityMappings = Array.isArray(data.identityMappings) ? data.identityMappings : [];
+    const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const events = Array.isArray(data.events) ? data.events : [];
+    const analyticsDimensionCaches = Array.isArray(data.analyticsDimensionCaches) ? data.analyticsDimensionCaches : [];
+    await prisma.$transaction(async (tx) => {
+        await tx.$executeRawUnsafe('TRUNCATE TABLE "Event", "Session", "IdentityMapping", "Visitor", "User", "AnalyticsDimensionCache" RESTART IDENTITY CASCADE');
+        if (visitors.length > 0) {
+            await tx.visitor.createMany({
+                data: visitors.map((v) => ({
+                    id: String(v.id),
+                    createdAt: new Date(v.createdAt),
+                })),
+            });
+        }
+        if (users.length > 0) {
+            await tx.user.createMany({
+                data: users.map((u) => ({
+                    id: String(u.id),
+                    email: u.email ?? null,
+                    name: u.name ?? null,
+                    erpId: u.erpId ?? null,
+                    traits: u.traits ?? client_1.Prisma.JsonNull,
+                    createdAt: new Date(u.createdAt),
+                })),
+            });
+        }
+        if (sessions.length > 0) {
+            await tx.session.createMany({
+                data: sessions.map((s) => ({
+                    id: String(s.id),
+                    visitorId: String(s.visitorId),
+                    startedAt: new Date(s.startedAt),
+                    updatedAt: new Date(s.updatedAt),
+                    endedAt: s.endedAt ? new Date(s.endedAt) : null,
+                    device: s.device ?? null,
+                    ip: s.ip ?? null,
+                    location: s.location ?? null,
+                    userAgent: s.userAgent ?? null,
+                })),
+            });
+        }
+        if (events.length > 0) {
+            await tx.event.createMany({
+                data: events.map((e) => ({
+                    id: String(e.id),
+                    sessionId: String(e.sessionId),
+                    name: String(e.name),
+                    properties: e.properties ?? client_1.Prisma.JsonNull,
+                    timestamp: new Date(e.timestamp),
+                })),
+            });
+        }
+        if (identityMappings.length > 0) {
+            await tx.identityMapping.createMany({
+                data: identityMappings.map((m) => ({
+                    id: Number(m.id),
+                    visitorId: String(m.visitorId),
+                    userId: String(m.userId),
+                    linkedAt: new Date(m.linkedAt),
+                })),
+            });
+        }
+        if (analyticsDimensionCaches.length > 0) {
+            await tx.analyticsDimensionCache.createMany({
+                data: analyticsDimensionCaches.map((c) => ({
+                    id: String(c.id),
+                    cacheKey: String(c.cacheKey),
+                    payload: c.payload ?? client_1.Prisma.JsonNull,
+                    computedAt: new Date(c.computedAt),
+                })),
+            });
+        }
+    });
+}
 app.get('/api/v1/db/backup', apiKeyMiddleware, async (_req, res) => {
+    if (isBackupOrRestoreRunning) {
+        return res.status(409).json({ error: 'Backup/restore is already running' });
+    }
+    isBackupOrRestoreRunning = true;
     try {
         const databaseUrl = resolveDatabaseUrl();
         const backupFileName = buildBackupFileName();
@@ -238,28 +354,59 @@ app.get('/api/v1/db/backup', apiKeyMiddleware, async (_req, res) => {
         res.status(200).send(stdout);
     }
     catch (error) {
+        if (error?.code === 'ENOENT') {
+            try {
+                const payload = await buildPrismaJsonBackup();
+                const body = JSON.stringify(payload, null, 2);
+                res.setHeader('X-Backup-Mode', 'json-fallback');
+                res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                res.setHeader('Content-Disposition', `attachment; filename="${buildBackupJsonFileName()}"`);
+                return res.status(200).send(body);
+            }
+            catch (fallbackError) {
+                const fallbackMsg = fallbackError?.message || 'Failed JSON fallback backup';
+                return res.status(500).json({ error: String(fallbackMsg).trim() });
+            }
+        }
         const message = error?.stderr || error?.message || 'Failed to create DB backup';
         res.status(500).json({ error: String(message).trim() });
     }
+    finally {
+        isBackupOrRestoreRunning = false;
+    }
 });
 app.post('/api/v1/db/backup/restore', apiKeyMiddleware, express_1.default.text({ type: '*/*', limit: `${DB_BACKUP_MAX_SIZE_MB}mb` }), async (req, res) => {
+    if (isBackupOrRestoreRunning) {
+        return res.status(409).json({ error: 'Backup/restore is already running' });
+    }
+    isBackupOrRestoreRunning = true;
     const sql = typeof req.body === 'string' ? req.body : '';
     if (!sql.trim()) {
+        isBackupOrRestoreRunning = false;
         return res.status(400).json({ error: 'Backup content is empty' });
     }
     const tempFilePath = path_1.default.join((0, node_os_1.tmpdir)(), `tracking-restore-${Date.now()}.sql`);
     try {
         const databaseUrl = resolveDatabaseUrl();
-        await prisma.$disconnect();
         await node_fs_1.promises.writeFile(tempFilePath, sql, 'utf8');
         await execFileAsync('psql', ['--dbname', databaseUrl, '--set', 'ON_ERROR_STOP=1', '--file', tempFilePath], {
             env: { ...process.env, PGPASSWORD: '' },
             maxBuffer: Math.max(DB_BACKUP_MAX_SIZE_BYTES, 5 * 1024 * 1024),
         });
-        await prisma.$connect();
         return res.json({ success: true });
     }
     catch (error) {
+        if (error?.code === 'ENOENT') {
+            try {
+                const jsonPayload = JSON.parse(sql);
+                await restoreFromPrismaJsonBackup(jsonPayload);
+                return res.json({ success: true, mode: 'json-fallback' });
+            }
+            catch (fallbackError) {
+                const fallbackMsg = fallbackError?.message || 'Failed JSON fallback restore';
+                return res.status(500).json({ error: String(fallbackMsg).trim() });
+            }
+        }
         const message = error?.stderr || error?.message || 'Failed to restore DB backup';
         return res.status(500).json({ error: String(message).trim() });
     }
@@ -270,12 +417,7 @@ app.post('/api/v1/db/backup/restore', apiKeyMiddleware, express_1.default.text({
         catch {
             /* ignore cleanup error */
         }
-        try {
-            await prisma.$connect();
-        }
-        catch {
-            /* ignore reconnect error */
-        }
+        isBackupOrRestoreRunning = false;
     }
 });
 function resolveLocationForNewSession(req, context) {
