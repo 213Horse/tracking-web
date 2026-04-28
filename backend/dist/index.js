@@ -194,7 +194,7 @@ if (process.env.TRUST_PROXY === '1') {
 app.use((0, cors_1.default)({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-api-key'],
+    allowedHeaders: ['Content-Type', 'x-api-key', 'cache-control', 'pragma'],
 }));
 app.use(express_1.default.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
 /** Liveness: không cần API key (monitoring, Nginx, curl sau deploy). */

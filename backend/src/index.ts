@@ -252,7 +252,7 @@ app.use(
   cors({
     origin: '*',
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'x-api-key'],
+    allowedHeaders: ['Content-Type', 'x-api-key', 'cache-control', 'pragma'],
   })
 );
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '256kb' }));
