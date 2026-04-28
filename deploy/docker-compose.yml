@@ -34,7 +34,8 @@ services:
     environment:
       PORT: "6510"
       NODE_ENV: production
-      DATABASE_URL: postgresql://${POSTGRES_USER:-tracking}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tracking_db}?schema=public
+      # Tăng Prisma pool để giảm timeout khi dashboard poll analytics.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-tracking}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tracking_db}?schema=public&connection_limit=${DATABASE_CONNECTION_LIMIT:-15}&pool_timeout=${DATABASE_POOL_TIMEOUT:-30}
       TRACKING_API_KEY: ${TRACKING_API_KEY:?set TRACKING_API_KEY}
       API_PUBLIC_URL: ${API_PUBLIC_URL:-https://tracking.david.io.vn}
       TRUST_PROXY: "1"
